@@ -1,0 +1,5 @@
+lupa>=1.14,<2.0
+pygame>=2.5.0
+PySDL2
+pysdl2-dll
+windows-curses>=2.3.0; sys_platform == "win32"
