@@ -1703,12 +1703,23 @@ def _lua_event_loop():
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         main()
     except KeyboardInterrupt:
+        pass
+    except SystemExit as e:
+        exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except Exception:
+        logger.exception("Fatal error in main()")
+        exit_code = 1
+    finally:
         try:
             from core import computer as _c
             _c.shutdown()
         except Exception:
-            _close_log_stream()
-            os._exit(0)
+            pass
+        _close_log_stream()
+        # os._exit гарантированно закрывает консоль/окно даже если остались
+        # non-daemon потоки (curses, pygame, reader-треды и т.п.).
+        os._exit(exit_code)
