@@ -1,4 +1,4 @@
--- PhoenixBIOS Setup Utility (OC Edition) - v7 (Black & Clean, boot-fix)
+-- PhoenixBIOS Setup Utility (OC Edition) - v8 (Multiline Error Fix)
 
 local gpuAddr = component.list("gpu")()
 if not gpuAddr then error("No GPU component!") end
@@ -24,12 +24,45 @@ local C_EMPTY     = 0x333333
 local C_MODAL_BG  = 0x111111
 
 local function setCol(fg, bg) gpu.setForeground(fg); gpu.setBackground(bg) end
+
+-- Очистка строки от ANSI и управляющих символов
+local function cleanStr(s)
+    if not s then return "" end
+    s = tostring(s)
+    s = s:gsub("\27%[[%d;]*m", "") -- Удаляем ANSI цвета
+    s = s:gsub("[%z\1-\31]", " ")  -- Заменяем управляющие символы на пробелы
+    return s
+end
+
 local function put(x, y, text, fg, bg)
     setCol(fg or C_TEXT, bg or C_BG)
-    text = tostring(text)
+    text = cleanStr(text)
     if #text > W - math.floor(x) + 1 then text = text:sub(1, W - math.floor(x) + 1) end
     gpu.set(math.floor(x), math.floor(y), text)
 end
+
+-- Специальная функция для вывода многострочного текста (ошибок)
+local function putError(x, y, text, fg, bg)
+    setCol(fg or C_TEXT, bg or C_BG)
+    local lines = {}
+    text = tostring(text)
+    -- Сначала бьем на строки по \n
+    for line in text:gmatch("[^\r\n]+") do
+        -- Очищаем каждую строку от мусора
+        line = line:gsub("\27%[[%d;]*m", "")
+        line = line:gsub("[%z\1-\31]", " ")
+        table.insert(lines, line)
+    end
+    -- Выводим построчно
+    for i, line in ipairs(lines) do
+        if y + i - 1 > H then break end
+        if #line > W - math.floor(x) + 1 then
+            line = line:sub(1, W - math.floor(x) + 1)
+        end
+        gpu.set(math.floor(x), math.floor(y) + i - 1, line)
+    end
+end
+
 local function fill(x, y, w, h, ch, fg, bg)
     setCol(fg or C_TEXT, bg or C_BG)
     gpu.fill(math.floor(x), math.floor(y), math.floor(w), math.floor(h), ch or " ")
@@ -83,7 +116,6 @@ local function fmtScore(n)
     end
 end
 
--- Сон, не прерываемый нажатиями клавиш.
 local function sleepPure(seconds)
     local deadline = computer.uptime() + seconds
     while true do
@@ -93,7 +125,6 @@ local function sleepPure(seconds)
     end
 end
 
--- Текущий default boot (из EEPROM), может быть nil.
 local function readBootAddress()
     local ok, v = pcall(computer.getBootAddress)
     if ok and type(v) == "string" and v ~= "" then
@@ -334,16 +365,11 @@ end
 
 -- ==== ЗАГРУЗКА ====
 
--- Пытается загрузить ОС с одного диска.
---   * Успех: ОС захватывает управление, xpcall не возвращается.
---   * Провал: возвращает false, BIOS продолжает работать.
 local function bootFrom(address)
     if type(address) ~= "string" then return false end
     local proxy = component.proxy(address)
     if not proxy then return false end
 
-    -- EEPROM data = адрес этого диска, чтобы загружаемая ОС
-    -- получила корректный computer.getBootAddress().
     pcall(computer.setBootAddress, address)
 
     for _, path in ipairs({"/OS.lua", "/init.lua"}) do
@@ -365,22 +391,22 @@ local function bootFrom(address)
                     if func then
                         local success, reason = xpcall(func, debug.traceback)
                         if success then
-                            -- Скрипт отработал и вернул управление — не ОС.
                             clear()
                             put(1, 1, "Not a bootable OS: " .. path, C_WARN, C_BG)
                             put(1, 3, "Script returned without taking over.", C_DIM, C_BG)
                             sleepPure(0.8)
                         else
+                            -- ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ ОШИБОК
                             clear()
                             put(1, 1, "FATAL ERROR in " .. path, C_WARN, C_BG)
-                            put(1, 3, tostring(reason):sub(1, W * (H - 4)), C_TEXT, C_BG)
+                            putError(1, 3, reason, C_TEXT, C_BG)
                             put(1, H, "Press any key to try next path...", C_TEXT, C_BG)
                             repeat local e = computer.pullSignal() until e == "key_down" or e == "touch"
                         end
                     else
                         clear()
                         put(1, 1, "Syntax error in " .. path, C_WARN, C_BG)
-                        put(1, 2, tostring(err):sub(1, W - 2), C_TEXT, C_BG)
+                        putError(1, 2, err, C_TEXT, C_BG)
                         put(1, H, "Press any key to try next path...", C_TEXT, C_BG)
                         repeat local e = computer.pullSignal() until e == "key_down" or e == "touch"
                     end
@@ -391,8 +417,6 @@ local function bootFrom(address)
     return false
 end
 
--- true-никогда-не-возвращается: успешный boot = ОС крутит свой цикл.
--- На полный провал возвращает false.
 local function tryBoot(preferred, noFallback)
     if preferred then
         bootFrom(preferred)
@@ -449,7 +473,7 @@ if splash() then
     local state = {
         tab = 1, sel = 1,
         running = true,
-        exitAction = nil,   -- "boot" | "bootExplicit" | "shutdown" | "reboot" | nil
+        exitAction = nil,
         bootAddr = info.bootAddr,
         scroll = 0,
     }
@@ -457,7 +481,6 @@ if splash() then
         state.bootAddr = info.disks[1].addr
     end
 
-    -- ==== ДИАЛОГИ ====
     local function drawModal(x, y, w, h, title)
         fill(1, 1, W, H, " ", C_TEXT, C_BG)
         fill(x, y, w, h, " ", C_TEXT, C_MODAL_BG)
@@ -529,7 +552,6 @@ if splash() then
         end
     end
 
-    -- ==== BENCH UI ====
     local function drawBenchUI(title, phase, infoText, percent, samples, maxSample)
         clear()
         fill(1, 1, W, 1, " ", C_ACTIVE_FG, C_ACTIVE_BG)
@@ -563,7 +585,6 @@ if splash() then
         return false
     end
 
-    -- ==== ТОЧНЫЕ БЕНЧИ ====
     local function benchCPU(targetDur, updateUI)
         local warmEnd = computer.uptime() + 0.2
         local warmOps = 0
@@ -731,7 +752,6 @@ if splash() then
         }
     end
 
-    -- ==== UTILITIES ====
     local function utilFormat(disk)
         if not confirmPrompt("Format: " .. disk.label, "ALL FILES WILL BE DELETED PERMANENTLY!") then
             showResult("Format", {"Cancelled"}); return
@@ -935,7 +955,6 @@ if splash() then
         showResult("Components Refreshed", {"Prev: " .. old, "New: " .. #info.comps, "Disks: " .. #info.disks})
     end
 
-    -- ==== OVERALL BENCHMARK ====
     local function utilOverallBench()
         local scores = { cpu = 0, mem = 0, disk = 0 }
         local details = {}
@@ -1047,7 +1066,6 @@ if splash() then
         return 1
     end
 
-    -- ==== ВНЕШНИЙ ЦИКЛ: BIOS ↔ попытка загрузки ====
     while true do
         state.running = true
         state.exitAction = nil
@@ -1125,7 +1143,6 @@ if splash() then
             end
         end
 
-        -- ==== Разбор exitAction ====
         if state.exitAction == "shutdown" then
             clear()
             put(1, 1, "Shutting down...", C_TEXT, C_BG)
@@ -1153,7 +1170,6 @@ if splash() then
                 local explicit = (state.exitAction == "bootExplicit")
                 tryBoot(state.bootAddr, explicit)
 
-                -- Если мы здесь — загрузка провалилась.
                 clear()
                 put(2, math.floor(H/2), "No bootable OS found.", C_WARN, C_BG)
                 if explicit then
@@ -1165,21 +1181,16 @@ if splash() then
                 repeat local e = computer.pullSignal() until e == "key_down" or e == "touch"
             end
         else
-            -- Неизвестный exitAction — выходим из BIOS.
             break
         end
     end
 
-    -- Сюда не должны попадать; страховка.
     computer.shutdown(true)
 else
-    -- Splash истёк — пробуем авто-загрузку без меню.
     clear()
     put(1, 1, "Booting...", C_TEXT, C_BG)
     sleepPure(0.3)
     tryBoot(readBootAddress(), false)
-    -- Авто-загрузка провалилась — ребут в BIOS (покажется splash,
-    -- за 2 секунды можно нажать клавишу и попасть в setup).
     clear()
     put(2, math.floor(H/2),     "No bootable OS found.", C_WARN, C_BG)
     put(2, math.floor(H/2) + 1, "Rebooting in 2 seconds (press any key for Setup)...", C_TEXT, C_BG)

@@ -37,6 +37,12 @@ _OOM_GRACE_KB = 8.0
 _MEM_HOOK_INTERVAL = 20000
 _GC_MIN_INTERVAL = 0.3
 
+# Коэффициент масштабирования памяти (должен совпадать с core/computer.py).
+# Компенсирует разницу в потреблении памяти между Lupa (Lua 5.4, 64-bit) 
+# и оригинальным OpenComputers (Lua 5.2/5.3, 32-bit).
+_MEMORY_SCALE = 0.5674
+_REAL_MEMORY_MULTIPLIER = 1.0 / _MEMORY_SCALE
+
 _GPU_KIND = "text"
 
 def _close_log_stream():
@@ -728,7 +734,8 @@ def _install_memory_hook(lua, limit_kb: float, baseline_kb: float = 0.0,
     except (TypeError, ValueError):
         return
 
-    effective_kb = limit_kb + _OOM_GRACE_KB
+    # Масштабируем лимит, чтобы 192KB в OC соответствовали ~338KB в Lupa
+    effective_kb = (limit_kb * _REAL_MEMORY_MULTIPLIER) + _OOM_GRACE_KB
 
     script = _lua_src(f"""
         do

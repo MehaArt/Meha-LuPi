@@ -53,6 +53,11 @@ _total_memory_bytes = _DEFAULT_MEMORY_BYTES
 _used_memory_getter: Callable[[], int] | None = None
 _memory_baseline_bytes = 0
 
+# Коэффициент масштабирования памяти.
+# Lupa (Lua 5.4) использует 64-битные указатели, из-за чего потребляет 
+# ~1.76x больше памяти, чем 32-битный Lua в оригинальном OpenComputers.
+_MEMORY_SCALE = 0.5674
+
 
 def set_memory_model(total_bytes: int):
     """Задать полный объём ОЗУ (в байтах). Меньше 4 КБ — обрезается."""
@@ -106,7 +111,9 @@ def _raw_used_memory() -> int:
 def used_memory() -> int:
     raw = _raw_used_memory()
     used = raw - _memory_baseline_bytes
-    return used if used > 0 else 0
+    if used < 0:
+        used = 0
+    return int(used * _MEMORY_SCALE)
 
 
 def raw_memory_used() -> int:
