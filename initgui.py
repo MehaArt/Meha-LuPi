@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-initgui.py — лаунчер LuPI (v23 - Ultimate Fix).
+initgui.py — лаунчер LuPI (v24 - Sound Options).
 """
 from __future__ import annotations
 import os, sys, json, shlex, time, tempfile, threading, subprocess, io, atexit
@@ -65,6 +65,7 @@ DEFAULTS = {
     "mounts": [], "res_mode": "oc", "cols": 80, "rows": 25,
     "px_w": 640, "px_h": 400, "scale": 1, "fps": 30,
     "allow_resize": False, "bios": "bios/code.lua", "extra": "",
+    "allow_beep": False, "allow_sounds": False,
 }
 
 ROOT_OPTIONS = ["openos", "mineos", ""]
@@ -182,6 +183,8 @@ class App(tk.Tk):
         cfg["allow_resize"] = bool(self.v["allow_resize"].get())
         cfg["bios"]  = self.v["bios"].get().strip()
         cfg["extra"] = self.v["extra"].get().strip()
+        cfg["allow_beep"]   = bool(self.v["allow_beep"].get())
+        cfg["allow_sounds"] = bool(self.v["allow_sounds"].get())
         return cfg
 
     def _save(self):
@@ -233,6 +236,7 @@ class App(tk.Tk):
         self._build_tab_main()
         self._build_tab_display()
         self._build_tab_disks()
+        self._build_tab_sound()
         self._build_tab_bios()
 
         log_frame = ttk.Frame(self.paned)
@@ -483,6 +487,22 @@ class App(tk.Tk):
             tag = "[RW]" if m.get("rw") else "[RO]"
             self.disk_list.insert("end", f"  {tag}  {m['path']}")
 
+    def _build_tab_sound(self):
+        tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  Sound  "); tab.columnconfigure(0, weight=1)
+        
+        ttk.Label(tab, text="Sound & Beeps", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(tab, text="By default, all sounds are disabled to prevent unnecessary noise.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 16))
+        
+        self.v["allow_beep"] = tk.BooleanVar()
+        chk_beep = ttk.Checkbutton(tab, text="Allow computer.beep() (Lua) and error beeps", variable=self.v["allow_beep"])
+        chk_beep.grid(row=2, column=0, sticky="w", pady=(0, 12))
+        
+        self.v["allow_sounds"] = tk.BooleanVar()
+        chk_sound = ttk.Checkbutton(tab, text="Allow sound component playback (music, effects)", variable=self.v["allow_sounds"])
+        chk_sound.grid(row=3, column=0, sticky="w", pady=(0, 12))
+        
+        ttk.Label(tab, text="Note: Error BSODs will also beep twice if 'computer.beep()' is allowed.", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(16, 0))
+
     def _build_tab_bios(self):
         tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  BIOS  "); tab.columnconfigure(1, weight=1)
         r = 0
@@ -575,6 +595,9 @@ class App(tk.Tk):
         self.v["scale"].set(_int(c.get("scale"), 1)); self.v["fps"].set(str(c.get("fps", 30)))
         self.v["allow_resize"].set(bool(c.get("allow_resize", False))); self.v["bios"].set(c.get("bios", "bios/code.lua"))
         self.v["extra"].set(c.get("extra", ""))
+        self.v["allow_beep"].set(bool(c.get("allow_beep", False)))
+        self.v["allow_sounds"].set(bool(c.get("allow_sounds", False)))
+        
         self._refresh_disks(); self._bios_load_meta(); self._on_res_mode_change(); self._on_scale_change()
 
     def _apply_theme(self):
@@ -637,6 +660,8 @@ class App(tk.Tk):
             if cw != 8 or ch != 16: a += ["--cell", f"{cw}x{ch}"]
         if c["fps"] and c["fps"] != 30: a += ["--fps", str(c["fps"])]
         if c["allow_resize"]: a.append("--allow-resize")
+        if c["allow_beep"]: a.append("--allow-beep")
+        if c["allow_sounds"]: a.append("--allow-sounds")
         if c["extra"]:
             try: a += shlex.split(c["extra"])
             except ValueError as e: raise RuntimeError(f"invalid extra args: {e}")
@@ -684,7 +709,6 @@ class App(tk.Tk):
         return True
 
     def _launch_capture(self, base: list[str]):
-        """GPU-режимы (pygame/tk/sdl2): запускаем python напрямую, ловим stdout."""
         exe = _python_exe()
         args = [exe, "-u"] + base
 
@@ -702,7 +726,6 @@ class App(tk.Tk):
             "errors": "replace",
         }
         if IS_WIN:
-            # без shell=True! Иначе кастомный Python без COMSPEC валит CreateProcess с WinError 87
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
         self.proc = subprocess.Popen(args, **kwargs)
@@ -733,14 +756,11 @@ class App(tk.Tk):
 
 
     def _launch_terminal(self, base: list[str]):
-        """Текстовый режим: своя консоль, без .bat и без pause."""
         exe = _python_exe()
         args = [exe, "-u"] + base
 
         kwargs = {"cwd": HERE}
         if IS_WIN:
-            # Даём процессу собственную консоль. Когда python выйдет — она
-            # закроется автоматически. Никаких .bat и никакого `pause`.
             kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
 
         self.proc = subprocess.Popen(args, **kwargs)

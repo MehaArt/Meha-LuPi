@@ -37,9 +37,6 @@ _OOM_GRACE_KB = 8.0
 _MEM_HOOK_INTERVAL = 20000
 _GC_MIN_INTERVAL = 0.3
 
-# Коэффициент масштабирования памяти (должен совпадать с core/computer.py).
-# Компенсирует разницу в потреблении памяти между Lupa (Lua 5.4, 64-bit) 
-# и оригинальным OpenComputers (Lua 5.2/5.3, 32-bit).
 _MEMORY_SCALE = 0.5674
 _REAL_MEMORY_MULTIPLIER = 1.0 / _MEMORY_SCALE
 
@@ -100,10 +97,6 @@ def _parse_ram(s):
 
 
 def _expand_mounts(specs):
-    """
-    ['a, b', 'c']  →  ['a', 'b', 'c']
-    Принимает несколько --mount-disk флагов И запятую внутри одного флага.
-    """
     result = []
     for raw in specs or []:
         for part in str(raw).split(','):
@@ -184,6 +177,13 @@ def parse_args():
                         "Default: 64M. Env: LUPI_RAM.")
     p.add_argument("--no-ram-enforce", action="store_true",
                    help="Disable hard RAM enforcement.")
+
+    p.add_argument("--allow-beep", action="store_true",
+                   help="Enable computer.beep() sounds, including error beeps "
+                        "(default: off).")
+    p.add_argument("--allow-sounds", action="store_true",
+                   help="Enable the sound component's playback "
+                        "(default: off).")
     return p.parse_args()
 
 
@@ -227,12 +227,6 @@ def _compute_wide_ranges(codepoints) -> list[tuple[int, int]]:
 
 
 def _mount_disk(spec: str, readonly: bool, filesystem_mod) -> None:
-    """
-    Смонтировать один дополнительный диск.
-    readonly=True → только чтение, каталог ДОЛЖЕН существовать.
-    readonly=False → чтение-запись, каталог создаётся если нет.
-    Все ошибки логируются и в stderr, и в lupi.log, затем sys.exit(1).
-    """
     tag = "RO" if readonly else "RW"
     flag_name = "--mount-disk" if readonly else "--mount-disk-rw"
 
@@ -357,7 +351,6 @@ def main():
     component_mod.prepare()
     computer_mod.prepare()
 
-    # ── EEPROM: сам файл --bios = хранилище кода ─────────────────────
     lprint("Registering EEPROM...")
     _bios_existed = os.path.isfile(args.bios)
     _meta_existed = os.path.isfile(args.bios + ".meta")
@@ -372,13 +365,14 @@ def main():
         src = "DEFAULT_BOOT_CODE"
     lprint(f"EEPROM: uuid={_eeprom_addr}, code={args.bios} (from {src}), "
            f"meta={'present' if _meta_existed else 'created'}")
-    # ─────────────────────────────────────────────────────────────────
 
     lprint("Registering GPIO...")
     gpio_mod.register()
     lprint("Registering Internet...")
     internet_mod.start()
     lprint("Registering Sound...")
+    sound_mod.set_emit_beeps(args.allow_beep)
+    sound_mod.set_emit_sounds(args.allow_sounds)
     sound_mod.register()
     lprint("Registering Clipboard...")
     clipboard_mod.register()
@@ -424,13 +418,11 @@ def main():
     tmp_addr = filesystem_mod.register(tmp_dir, label=args.tmp_label)
     computer_mod._tmp_address = tmp_addr
 
-    # ── Extra disks ────────────────────────────────────────────────
     for spec in _expand_mounts(args.mount_disk):
         _mount_disk(spec, readonly=True, filesystem_mod=filesystem_mod)
 
     for spec in _expand_mounts(args.mount_disk_rw):
         _mount_disk(spec, readonly=False, filesystem_mod=filesystem_mod)
-    # ───────────────────────────────────────────────────────────────
 
     from gpu.base import (BASE_CELL_W, BASE_CELL_H,
                           HARD_MAX_COLS, HARD_MAX_ROWS)
@@ -457,7 +449,6 @@ def main():
             calc_rows = max(1, rh // chh)
             cols = min(calc_cols, HARD_MAX_COLS)
             rows = min(calc_rows, HARD_MAX_ROWS)
-            # Если задан --resolution, запрещаем OpenOS растягивать окно больше него
             if args.max_cols is None:
                 args.max_cols = cols
             if args.max_rows is None:
@@ -516,7 +507,6 @@ def main():
             _GPU_KIND = "none"
         lprint("No GPU initialized — running headless")
 
-    # ── Найти зарегистрированный EEPROM и прочитать BIOS ─────────────
     eeprom_iter, _ = component_mod.list("eeprom")
     eeprom_pair = eeprom_iter()
     eeprom_addr = eeprom_pair[0] if eeprom_pair else None
@@ -536,9 +526,6 @@ def main():
 
     lprint(f"BIOS loaded from {args.bios} ({len(bios_code)} B)")
 
-    # setData в eeprom НЕ уважает readonly (OC/OCEmu-семантика) — иначе
-    # при readonly bootAddress остаётся старым (указывает на несуществующий
-    # FS) и BIOS / OS.lua крашатся.
     try:
         r = component_mod.invoke(eeprom_addr, "setData", root_fs_addr)
         if r is True:
@@ -565,7 +552,6 @@ local function utf8_codepoints(s)
     if b < 0x80 then
       cp = b
     elseif b < 0xE0 then
-      -- Защита от обрезанных символов (nil заменяем на 0x80)
       local b2 = ch:byte(2) or 0x80
       cp = (b - 0xC0) * 0x40 + (b2 - 0x80)
     elseif b < 0xF0 then
@@ -705,11 +691,6 @@ def _make_lua_print():
     return _lua_print
 
 def _lua_beep(freq=1000.0, duration=0.1, *_):
-    """
-    Lua-обёртка computer.beep().
-    OC-спека: duration — в СЕКУНДАХ.
-    computer_mod.beep() ожидает МИЛЛИСЕКУНДЫ.
-    """
     try:
         f = float(freq)
     except (TypeError, ValueError):
@@ -734,7 +715,6 @@ def _install_memory_hook(lua, limit_kb: float, baseline_kb: float = 0.0,
     except (TypeError, ValueError):
         return
 
-    # Масштабируем лимит, чтобы 192KB в OC соответствовали ~338KB в Lupa
     effective_kb = (limit_kb * _REAL_MEMORY_MULTIPLIER) + _OOM_GRACE_KB
 
     script = _lua_src(f"""
@@ -805,6 +785,26 @@ def _wait_for_key() -> None:
             continue
         if sig and sig[0] in ("key_down", "touch", "drag"):
             return
+
+
+def _error_beeps():
+    """
+    Классический POST-сигнал: 2 бипа с интервалом 0.5 с.
+    Играет только если включён --allow-beep (проверка внутри computer.beep).
+    """
+    try:
+        for i in range(2):
+            computer_mod.beep(880, 150)
+            if i == 0:
+                deadline = time.monotonic() + 0.5
+                while True:
+                    remain = deadline - time.monotonic()
+                    if remain <= 0:
+                        break
+                    _pump_events_once()
+                    time.sleep(min(0.02, remain))
+    except Exception:
+        logger.exception("_error_beeps failed")
 
 
 def _drain_stale_signals():
@@ -916,11 +916,6 @@ def _draw_bsod_via_gpu(title: str, lines: list[str]) -> bool:
 
         put_center(h - 1, "Press any key...", 0xAAAAAA)
 
-        try:
-            computer_mod.beep(880, 150)
-        except Exception:
-            pass
-
         _pump_events_once()
         return True
     except Exception:
@@ -951,16 +946,20 @@ def _oom_screen(used_kb: float, limit_kb: float, original: str = ""):
     for ln in lines:
         logger.error("OOM: %s", ln)
 
+    drawn = False
     if _GPU_KIND in ("graphics", "text"):
         _drain_stale_signals()
         drawn = _draw_bsod_via_gpu(title, lines)
-        if drawn:
-            _wait_for_key()
-            try:
-                computer_mod.shutdown()
-            except Exception:
-                pass
-            sys.exit(0)
+
+    _error_beeps()
+
+    if drawn:
+        _wait_for_key()
+        try:
+            computer_mod.shutdown()
+        except Exception:
+            pass
+        sys.exit(0)
 
     if _GPU_KIND == "text":
         try:
@@ -989,16 +988,20 @@ def _bsod(*messages):
     except Exception:
         pass
 
+    drawn = False
     if _GPU_KIND in ("graphics", "text"):
         _drain_stale_signals()
         drawn = _draw_bsod_via_gpu(title, lines)
-        if drawn:
-            _wait_for_key()
-            try:
-                computer_mod.shutdown()
-            except Exception:
-                pass
-            sys.exit(0)
+
+    _error_beeps()
+
+    if drawn:
+        _wait_for_key()
+        try:
+            computer_mod.shutdown()
+        except Exception:
+            pass
+        sys.exit(0)
 
     if _GPU_KIND == "text":
         try:
@@ -1030,7 +1033,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
         if _DEBUG_MODE:
             G.print = _make_lua_print()
 
-        # ── Трекер памяти Lua ──────────────────────────────────────────
         try:
             _mem_fn = lua.eval("function() return collectgarbage('count') end")
             _gc_collect_fn = lua.eval("function() collectgarbage('collect') end")
@@ -1062,7 +1064,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
             logger.info("Memory tracker installed (Lua collectgarbage + "
                         "rate-limited full GC every %.2fs)", _gc_min_interval)
 
-        # ── Инициализация Lua-глобалов ─────────────────────────────────
         unicode_lib = lua.execute(_lua_src(_UNICODE_LUA))
         G.unicode = unicode_lib
 
@@ -1248,8 +1249,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
             end
         """))
 
-        # Принудительно переопределяем os.exit, чтобы он никогда не вызывал
-        # нативный C-шный exit(), который убивает процесс Python.
         lua.execute(_lua_src(r"""
             os.exit = function(code)
                 error({reason="terminated", code=code or 0}, 0)
@@ -1322,7 +1321,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
 
                 function _lupi_errMsg(err)
                     if _type(err) == "string" then return err end
-                    -- Если это штатный выход os.exit, возвращаем таблицу как есть!
                     if _type(err) == "table" and err.reason then return err end
                     
                     local mt = getmetatable(err)
@@ -1352,9 +1350,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
                     _patch_all()
                     local args = table.pack(...)
                     return _xpcall(f, function(err)
-                        -- Просто передаем ошибку в handler. 
-                        -- Если это таблица завершения, она останется таблицей,
-                        -- и process.lua корректно поймет, что это os.exit.
                         return handler(_lupi_errMsg(err))
                     end, table.unpack(args, 1, args.n))
                 end
@@ -1407,8 +1402,6 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
                     value.encode('latin-1')
                     return value
                 except UnicodeEncodeError:
-                    # Если символ не влезает в latin-1 (кириллица, иероглифы),
-                    # кодируем его в UTF-8 и отдаем как latin-1 строку для Lupa.
                     return value.encode('utf-8').decode('latin-1')
             return value
 
@@ -1552,12 +1545,8 @@ def _boot(gpu_addr: str | None, eeprom_addr: str, bios_code: str,
         computer.shutdown       = computer_mod.shutdown
         computer.getBootAddress = lambda: component_mod.invoke(eeprom_addr, "getData")
         computer.setBootAddress = lambda addr=None: component_mod.invoke(eeprom_addr, "setData", addr or "")
-        # Оборачиваем в _lua_convert, чтобы dict превратился в настоящую Lua-таблицу
         computer.getDeviceInfo  = lambda: _lua_convert(computer_mod.get_device_info())
 
-        # OCEmu-совместимые методы (см. core/computer.py):
-        # getArchitectures / getArchitecture / setArchitecture / addUser /
-        # removeUser / getProgramLocations.
         computer.getArchitectures    = lambda: _lua_convert(computer_mod.get_architectures())
         computer.getArchitecture     = computer_mod.get_architecture
         computer.setArchitecture     = computer_mod.set_architecture
@@ -1727,6 +1716,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         _close_log_stream()
-        # os._exit гарантированно закрывает консоль/окно даже если остались
-        # non-daemon потоки (curses, pygame, reader-треды и т.п.).
         os._exit(exit_code)

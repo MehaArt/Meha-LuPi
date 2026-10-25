@@ -2,15 +2,6 @@
 computer.py — порт src/lua/core/computer.lua + src/c/main.c (event loop)
 
 Управление сигналами / событиями, uptime, beep, память и т.д.
-
-Модель ОЗУ:
-  * total    — виртуальный объём «плашки» (--ram);
-  * raw_heap — реальный Lua-heap (collectgarbage("count"));
-  * baseline — «вес» нашего рантайма, снимается сразу после init;
-  * used = max(0, raw_heap - baseline);
-  * free = max(0, total - used).
-
-Enforcement делается в init.py через debug.sethook.
 """
 from __future__ import annotations
 import os
@@ -29,7 +20,7 @@ _WAIT_POLL_INTERVAL = 0.01
 _NONBLOCK_SLEEP = 0.002
 _PUMP_MAX_HZ = 60.0
 _LOG_RATE_HZ = 500.0
-_DRAIN_SAFETY_PUMP_INTERVAL = 0.5   # сек: не даём окну залипнуть при долгом drain
+_DRAIN_SAFETY_PUMP_INTERVAL = 0.5
 _drain_last_pump = time.monotonic()
 
 # ── Внутреннее состояние ──────────────────────────────────────────────────────
@@ -53,14 +44,10 @@ _total_memory_bytes = _DEFAULT_MEMORY_BYTES
 _used_memory_getter: Callable[[], int] | None = None
 _memory_baseline_bytes = 0
 
-# Коэффициент масштабирования памяти.
-# Lupa (Lua 5.4) использует 64-битные указатели, из-за чего потребляет 
-# ~1.76x больше памяти, чем 32-битный Lua в оригинальном OpenComputers.
 _MEMORY_SCALE = 0.5674
 
 
 def set_memory_model(total_bytes: int):
-    """Задать полный объём ОЗУ (в байтах). Меньше 4 КБ — обрезается."""
     global _total_memory_bytes
     try:
         n = int(total_bytes)
@@ -73,13 +60,11 @@ def set_memory_model(total_bytes: int):
 
 
 def set_memory_usage_getter(fn: Callable[[], int] | None):
-    """Callback, возвращающий РЕАЛЬНЫЙ Lua-heap в байтах (или None)."""
     global _used_memory_getter
     _used_memory_getter = fn
 
 
 def set_memory_baseline(bytes_: int):
-    """Зафиксировать «вес» рантайма, не считающийся памятью ОС."""
     global _memory_baseline_bytes
     try:
         n = int(bytes_)
@@ -185,16 +170,6 @@ def _pull_rate_check():
     _pull_counter_ts = now
 
 def pull_signal(timeout: float | None = None):
-    """
-    Возвращает один сигнал или None.
-
-    Оптимизация:
-      * Fast-path — если сигнал уже в очереди, отдаём его МГНОВЕННО,
-        не запуская pump (это ускоряет Ctrl+V paste в 2–3 раза —
-        между символами не происходит перерисовки).
-      * Safety-pump — если дренаж длится >0.5с, всё равно запускаем
-        pump, чтобы окно не залипло и не пропустило клики.
-    """
     global _drain_last_pump
     _pull_rate_check()
 
@@ -205,7 +180,6 @@ def pull_signal(timeout: float | None = None):
         except (TypeError, ValueError):
             timeout = None
 
-    # ── Fast path: сигнал уже в очереди ────────────────────────────
     try:
         item = _signal_queue.get_nowait()
         if _pump_hook is not None:
@@ -221,7 +195,6 @@ def pull_signal(timeout: float | None = None):
     except queue.Empty:
         pass
 
-    # ── Slow path ──────────────────────────────────────────────────
     if timeout is not None and timeout <= 0:
         _maybe_pump()
         try:
@@ -333,7 +306,8 @@ def push_signal(signal: str, *args):
     logger.debug("push_signal: %s", transformed)
 
 
-def beep(freq: int = 1000, duration_ms: float = 200):
+def _do_beep(freq: int = 1000, duration_ms: float = 200):
+    """Низкоуровневый beep. Флаги НЕ проверяет — только играет."""
     try:
         freq = float(freq)
         duration_ms = float(duration_ms)
@@ -375,6 +349,17 @@ def beep(freq: int = 1000, duration_ms: float = 200):
         logger.debug("PC speaker ioctl failed: %s", e)
 
     logger.debug("beep: no sound backend available")
+
+
+def beep(freq: int = 1000, duration_ms: float = 200, *_):
+    """computer.beep() — уважает флаг --allow-beep."""
+    try:
+        from core import sound as _sound
+        if not _sound.beeps_enabled():
+            return
+    except Exception:
+        pass
+    _do_beep(freq, duration_ms)
 
 
 def tmp_address() -> str:
@@ -515,13 +500,7 @@ class KeyboardReader:
             termios.tcsetattr(fd, TCSAFLUSH, old)
 
 
-# ─── Расширения, совместимые с OCEmu ─────────────────────────────────────────
-
 def get_device_info() -> dict:
-    """
-    Минимальная замена computer.getDeviceInfo():
-    для каждого компонента возвращаем его type в поле Class.
-    """
     try:
         from core import component as component_mod
     except Exception:
@@ -536,11 +515,8 @@ def get_device_info() -> dict:
             "Capacity":    0,
         }
     return out
-    
-# ─── OCEmu-совместимые расширения computer API ───────────────────────────────
 
-# Архитектуры, которые мы «эмулируем». Первая — дефолтная, getArchitecture()
-# возвращает именно её. Порядок совпадает с OCEmu.
+
 _ARCHITECTURES: tuple[str, ...] = (
     "Lua 5.4",
     "Lua 5.3",
@@ -549,11 +525,6 @@ _ARCHITECTURES: tuple[str, ...] = (
     "LuaJIT 2.1",
 )
 
-# Каталог «программ, доступных на установочных дисках» (OC spec).
-# OC использует Map<String, String>: имя программы → метка диска.
-# OCEmu ошибочно возвращает table.pack(pack(name, disk), ...) — это не по
-# спеке; мы придерживаемся OC spec (map), т.к. именно это ожидает
-# OpenOS/mineos.
 _PROGRAMS: dict[str, str] = {
     "build":     "builder",
     "dig":       "dig",
@@ -576,22 +547,14 @@ _PROGRAMS: dict[str, str] = {
 
 
 def get_architectures() -> dict:
-    """computer.getArchitectures() → {[1]="Lua 5.4", [2]=...}."""
     return {i + 1: name for i, name in enumerate(_ARCHITECTURES)}
 
 
 def get_architecture() -> str:
-    """computer.getArchitecture() → текущая архитектура."""
     return _ARCHITECTURES[0]
 
 
 def set_architecture(name) -> tuple:
-    """
-    computer.setArchitecture(name) — переключить архитектуру.
-    Возвращает:
-      * False                    — если name совпадает с текущей (уже выбрана)
-      * nil, "unknown architecture" — если name не из списка
-    """
     if not isinstance(name, str):
         raise TypeError(
             f"bad argument #1 (string expected, got {type(name).__name__})")
@@ -601,10 +564,6 @@ def set_architecture(name) -> tuple:
 
 
 def add_user(username) -> tuple:
-    """
-    computer.addUser(username) — в реальном OC добавляет игрока в машину.
-    У нас нет игроков, поэтому — stub как в OCEmu.
-    """
     if not isinstance(username, str):
         raise TypeError(
             f"bad argument #1 (string expected, got {type(username).__name__})")
@@ -612,9 +571,6 @@ def add_user(username) -> tuple:
 
 
 def remove_user(username) -> bool:
-    """
-    computer.removeUser(username) — stub как в OCEmu.
-    """
     if not isinstance(username, str):
         raise TypeError(
             f"bad argument #1 (string expected, got {type(username).__name__})")
@@ -622,9 +578,4 @@ def remove_user(username) -> bool:
 
 
 def get_program_locations() -> dict:
-    """
-    computer.getProgramLocations() → {program_name = install_disk_label}.
-
-    Возвращает копию статической таблицы (безопасно от мутаций).
-    """
     return dict(_PROGRAMS)

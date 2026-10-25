@@ -13,7 +13,12 @@ sound.py — sound-компонент для LuPI (OpenComputers-совмест�
 
 Воспроизведение идёт через util/speaker.py (ноль pip-зависимостей):
   pygame.mixer → winsound → aplay/paplay → afplay → тишина.
-Отключить реальное воспроизведение: LUPI_SOUND=0.
+
+Флаги (по умолчанию ОБА ВЫКЛЮЧЕНЫ):
+  * --allow-beep   → включает computer.beep() (см. set_emit_beeps)
+  * --allow-sounds → включает воспроизведение звукового компонента
+                     (см. set_emit_sounds)
+  Env LUPI_SOUND=1 включает оба, LUPI_SOUND=0 выключает оба.
 """
 from __future__ import annotations
 import os
@@ -25,12 +30,36 @@ from core import component as component_mod
 
 logger = logging.getLogger("lupi.sound")
 
-# По умолчанию звук ВКЛЮЧЁН. Отключить: LUPI_SOUND=0 (или false/no/off).
+# По умолчанию звук/бипы ВЫКЛЮЧЕНЫ.
 _val = os.getenv("LUPI_SOUND")
-_EMIT_ACTUAL_SOUND = (
-    True if _val is None
-    else _val.strip().lower() not in ("0", "false", "no", "off")
-)
+if _val is None:
+    _EMIT_SOUNDS = False
+    _EMIT_BEEPS  = False
+else:
+    _on = _val.strip().lower() not in ("0", "false", "no", "off")
+    _EMIT_SOUNDS = _on
+    _EMIT_BEEPS  = _on
+
+
+def set_emit_sounds(enabled: bool) -> None:
+    """Включить/выключить воспроизведение звукового компонента."""
+    global _EMIT_SOUNDS
+    _EMIT_SOUNDS = bool(enabled)
+
+
+def set_emit_beeps(enabled: bool) -> None:
+    """Включить/выключить computer.beep()."""
+    global _EMIT_BEEPS
+    _EMIT_BEEPS = bool(enabled)
+
+
+def sounds_enabled() -> bool:
+    return _EMIT_SOUNDS
+
+
+def beeps_enabled() -> bool:
+    return _EMIT_BEEPS
+
 
 # Значения как в OpenComputers EnumSoundMode.
 SOUND_MODES = {
@@ -247,15 +276,11 @@ class SoundComponent:
         return 1.0
 
     # ── envelope / modulation ──────────────────────────────────────────
-    # OC-семантика: attack/decay/release в МИЛЛИСЕКУНДАХ, sustain — уровень 0..1.
     def set_adsr(self, *args):
         ch, rest = self._ch(*args)
         nums = [_as_float(a) for a in rest]
         nums = [n for n in nums if n is not None]
 
-        # OC-спека: attack/decay/release — СЕКУНДЫ, sustain — уровень 0..1.
-        # Внутри эмулятора attack/decay/release хранятся в МИЛЛИСЕКУНДАХ
-        # (так их ожидает util/speaker._envelope_curve).
         if len(nums) >= 4:
             a, d, sus, r = nums[:4]
             ch.attack  = max(0.0, a) * 1000.0
@@ -361,8 +386,8 @@ class SoundComponent:
         delay_ms = self._delay_ms
         self._delay_ms = 0.0
 
-        if not _EMIT_ACTUAL_SOUND:
-            logger.debug("sound.process: muted (LUPI_SOUND)")
+        if not _EMIT_SOUNDS:
+            logger.debug("sound.process: muted (--allow-sounds not set)")
             if delay_ms > 0:
                 _sleep_with_pump(delay_ms / 1000.0)
             return True
@@ -400,9 +425,6 @@ class SoundComponent:
             except Exception:
                 logger.exception("sound.process: playback failed")
 
-        # Раньше тут был fallback через computer.beep — теперь его нет,
-        # чтобы избежать бесконечной рекурсии (computer.beep сам идёт
-        # через sound.play_beep). Просто тихо ждём длительность.
         logger.debug("sound.process: no speaker — silent wait %sms", delay_ms)
         if delay_ms > 0:
             _sleep_with_pump(delay_ms / 1000.0)
@@ -470,12 +492,11 @@ def register(uuid: str | None = None) -> str:
 
 def play_beep(freq: float = 1000.0, duration_ms: float = 200.0) -> bool:
     """
-    Синтезирует квадратный тон и играет через спикер.
-    Возвращает True, если звук реально ушёл в бэкенд.
-    """
-    if not _EMIT_ACTUAL_SOUND:
-        return False
+    Синтез квадратного тона.
 
+    ВАЖНО: не проверяет флаги. Проверка --allow-beep выполняется
+    на уровне computer.beep() (см. core/computer.py).
+    """
     sp = _get_speaker()
     if sp is None or not sp.available:
         return False

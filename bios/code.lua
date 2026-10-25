@@ -401,6 +401,14 @@ local function bootFrom(address)
                             put(1, 1, "FATAL ERROR in " .. path, C_WARN, C_BG)
                             putError(1, 3, reason, C_TEXT, C_BG)
                             put(1, H, "Press any key to try next path...", C_TEXT, C_BG)
+                            
+                            -- Двойной бип при фатальной ошибке (уважает --allow-beep)
+                            if computer.beep then
+                                computer.beep(880, 0.15)
+                                os.sleep(0.5)
+                                computer.beep(880, 0.15)
+                            end
+                            
                             repeat local e = computer.pullSignal() until e == "key_down" or e == "touch"
                         end
                     else
@@ -408,6 +416,14 @@ local function bootFrom(address)
                         put(1, 1, "Syntax error in " .. path, C_WARN, C_BG)
                         putError(1, 2, err, C_TEXT, C_BG)
                         put(1, H, "Press any key to try next path...", C_TEXT, C_BG)
+                        
+                        -- Двойной бип при синтаксической ошибке (уважает --allow-beep)
+                        if computer.beep then
+                            computer.beep(880, 0.15)
+                            os.sleep(0.5)
+                            computer.beep(880, 0.15)
+                        end
+                        
                         repeat local e = computer.pullSignal() until e == "key_down" or e == "touch"
                     end
                 end
