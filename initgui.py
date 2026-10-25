@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-initgui.py — лаунчер LuPI (v25 - FS Speed Limit).
+initgui.py — лаунчер LuPI (v26 - PC Sounds).
 """
 from __future__ import annotations
 import os, sys, json, shlex, time, tempfile, threading, subprocess, io, atexit
@@ -65,7 +65,7 @@ DEFAULTS = {
     "mounts": [], "res_mode": "oc", "cols": 80, "rows": 25,
     "px_w": 640, "px_h": 400, "scale": 1, "fps": 30,
     "allow_resize": False, "bios": "bios/code.lua", "extra": "",
-    "allow_beep": False, "allow_sounds": False,
+    "allow_beep": False, "allow_sounds": False, "allow_pc_sounds": False,
     "fs_speed": "8M",
 }
 
@@ -190,6 +190,7 @@ class App(tk.Tk):
         cfg["extra"] = self.v["extra"].get().strip()
         cfg["allow_beep"]   = bool(self.v["allow_beep"].get())
         cfg["allow_sounds"] = bool(self.v["allow_sounds"].get())
+        cfg["allow_pc_sounds"] = bool(self.v["allow_pc_sounds"].get())
         return cfg
 
     def _save(self):
@@ -538,7 +539,12 @@ class App(tk.Tk):
         chk_sound = ttk.Checkbutton(tab, text="Allow sound component playback (music, effects)", variable=self.v["allow_sounds"])
         chk_sound.grid(row=3, column=0, sticky="w", pady=(0, 12))
 
-        ttk.Label(tab, text="Note: Error BSODs will also beep twice if 'computer.beep()' is allowed.", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(16, 0))
+        self.v["allow_pc_sounds"] = tk.BooleanVar()
+        chk_pc = ttk.Checkbutton(tab, text="Allow PC ambient sounds (running hum + HDD access clicks)", variable=self.v["allow_pc_sounds"])
+        chk_pc.grid(row=4, column=0, sticky="w", pady=(0, 12))
+
+        ttk.Label(tab, text="Note: Error BSODs will also beep twice if 'computer.beep()' is allowed.", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(16, 0))
+        ttk.Label(tab, text="PC sounds require the 8 *.ogg files in core/sounds/ and pygame.", style="Muted.TLabel").grid(row=6, column=0, sticky="w", pady=(4, 0))
 
     def _build_tab_bios(self):
         tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  BIOS  "); tab.columnconfigure(1, weight=1)
@@ -634,6 +640,7 @@ class App(tk.Tk):
         self.v["extra"].set(c.get("extra", ""))
         self.v["allow_beep"].set(bool(c.get("allow_beep", False)))
         self.v["allow_sounds"].set(bool(c.get("allow_sounds", False)))
+        self.v["allow_pc_sounds"].set(bool(c.get("allow_pc_sounds", False)))
         self.v["fs_speed"].set(c.get("fs_speed", "8M"))
 
         self._refresh_disks(); self._bios_load_meta(); self._on_res_mode_change(); self._on_scale_change()
@@ -701,6 +708,7 @@ class App(tk.Tk):
         if c["allow_resize"]: a.append("--allow-resize")
         if c["allow_beep"]: a.append("--allow-beep")
         if c["allow_sounds"]: a.append("--allow-sounds")
+        if c["allow_pc_sounds"]: a.append("--allow-pc-sounds")
         if c["extra"]:
             try: a += shlex.split(c["extra"])
             except ValueError as e: raise RuntimeError(f"invalid extra args: {e}")

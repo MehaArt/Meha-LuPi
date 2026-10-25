@@ -145,7 +145,6 @@ def _expand_mounts(specs):
                 result.append(p)
     return result
 
-
 def parse_args():
     p = argparse.ArgumentParser(description="LuPI2 Python port")
 
@@ -169,24 +168,24 @@ def parse_args():
     p.add_argument(
         "--mount-disk", action="append", default=[],
         metavar="PATH[,PATH...]",
-        help="Доп. read-only диски. Можно перечислять через запятую "
-             "(--mount-disk a,b) или повторять флаг (--mount-disk a "
-             "--mount-disk b). Каталоги должны существовать. "
-             "Метка = basename(path), обрезается до 16 символов.",
+        help="Additional read-only disks. Can be comma-separated "
+             "(--mount-disk a,b) or the flag can be repeated "
+             "(--mount-disk a --mount-disk b). Directories must exist. "
+             "Label = basename(path), truncated to 16 chars.",
     )
     p.add_argument(
         "--mount-disk-rw", action="append", default=[],
         metavar="PATH[,PATH...]",
-        help="То же, что --mount-disk, но read-write. Каталоги создаются, "
-             "если отсутствуют.",
+        help="Same as --mount-disk but read-write. Directories are created "
+             "if missing.",
     )
 
     p.add_argument(
         "--fs-speed", default=None, metavar="BYTES",
-        help="Ограничение суммарной скорости чтения/записи КАЖДОЙ "
-             "файловой системы (байт/сек, можно с суффиксом k/m/g). "
-             "Например: --fs-speed 4k (не более 4 КиБ/с на диск). "
-             "0 / пусто = без лимита (по умолчанию).",
+        help="Per-filesystem combined read/write speed limit "
+             "(bytes/sec, supports k/m/g suffixes). "
+             "Example: --fs-speed 4k (at most 4 KiB/s per disk). "
+             "0 / empty = unlimited (default).",
     )
 
     p.add_argument("--bios",       default="bios/code.lua",
@@ -232,9 +231,13 @@ def parse_args():
     p.add_argument("--allow-sounds", action="store_true",
                    help="Enable the sound component's playback "
                         "(default: off).")
+    p.add_argument("--allow-pc-sounds", action="store_true",
+                   help="Play ambient PC noise: computer_running.ogg on "
+                        "loop + hdd_accessN.ogg on filesystem activity. "
+                        "Requires core/sounds/*.ogg and pygame. Emulator "
+                        "refuses to start if any of the 8 files is missing.")
     return p.parse_args()
-
-
+    
 # ── Вспомогательные ───────────────────────────────────────────────────────────
 
 def lprint(*args):
@@ -406,6 +409,23 @@ def main():
     else:
         lprint("Filesystem speed limit: unlimited")
 
+    # ── PC ambient sounds: валидация файлов до любых side effects ─────
+    _pc_sounds_enabled = bool(args.allow_pc_sounds)
+    if _pc_sounds_enabled:
+        from util import pcsounds as _pcsounds_mod
+        _missing = _pcsounds_mod.validate_files()
+        if _missing:
+            print("[init] --allow-pc-sounds: required sound file(s) missing:",
+                  file=sys.stderr)
+            for _p in _missing:
+                print(f"  {_p}", file=sys.stderr)
+            print(f"[init] expected directory: {_pcsounds_mod.sounds_dir()}",
+                  file=sys.stderr)
+            sys.stderr.flush()
+            sys.exit(1)
+        lprint(f"PC sounds: all required files present in "
+               f"{_pcsounds_mod.sounds_dir()}")
+
     lprint("LuPI Python Port — L1 INIT")
     machine_address = random_mod.uuid()
     lprint(f"Machine address: {machine_address}")
@@ -488,6 +508,18 @@ def main():
 
     for spec in _expand_mounts(args.mount_disk_rw):
         _mount_disk(spec, readonly=False, filesystem_mod=filesystem_mod)
+
+    # ── PC ambient sounds: запуск + подписка ФС на триггер ────────────
+    if _pc_sounds_enabled:
+        from util import pcsounds as _pcsounds_mod
+        try:
+            _pcsounds_mod.start()
+        except RuntimeError as e:
+            print(f"[init] {e}", file=sys.stderr); sys.stderr.flush()
+            sys.exit(1)
+        filesystem_mod.set_hdd_activity_hook(_pcsounds_mod.trigger_hdd)
+        computer_mod.add_shutdown_hook(_pcsounds_mod.stop)
+        lprint("PC ambient sounds: running hum + HDD click enabled")
 
     from gpu.base import (BASE_CELL_W, BASE_CELL_H,
                           HARD_MAX_COLS, HARD_MAX_ROWS)

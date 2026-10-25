@@ -18,6 +18,10 @@ rate_limit — если > 0, ограничивает суммарную ско�
 байт/сек (token bucket, допускает «всплеск» до 100 мс, чтобы мелкие
 операции вроде getLabel() не тормозили). Устанавливается глобально через
 set_default_rate_limit() (см. init.py --fs-speed). 0 = без лимита.
+
+hdd_hook — callback, устанавливаемый через set_hdd_activity_hook().
+Вызывается на реальном I/O (read/write/open w|a/remove/rename/
+makeDirectory). Используется --allow-pc-sounds для клика HDD.
 """
 from __future__ import annotations
 import os
@@ -54,6 +58,28 @@ def set_default_rate_limit(rate: int) -> None:
 
 def get_default_rate_limit() -> int:
     return _default_rate_limit
+
+
+# ── HDD activity hook (используется --allow-pc-sounds) ────────────────────────
+_hdd_hook = None
+
+
+def set_hdd_activity_hook(fn) -> None:
+    """
+    Установить callback, вызываемый на реальном I/O (read/write/open w|a/
+    remove/rename/makeDirectory). Ставится один раз на старте эмулятора.
+    """
+    global _hdd_hook
+    _hdd_hook = fn
+
+
+def _notify_hdd() -> None:
+    hook = _hdd_hook
+    if hook is not None:
+        try:
+            hook()
+        except Exception:
+            pass
 
 
 # ── Lua <-> Python строковые конверсии ────────────────────────────────────────
@@ -237,6 +263,8 @@ class Filesystem:
         handle = self._next_handle
         self._next_handle += 1
         self._handles[handle] = f
+        if m != "r":
+            _notify_hdd()
         return handle
 
     def seek(self, handle, whence, offset=0, *_):
@@ -254,6 +282,7 @@ class Filesystem:
             return False
         try:
             os.makedirs(self._real(path), exist_ok=True)
+            _notify_hdd()
             return True
         except OSError:
             return False
@@ -277,6 +306,7 @@ class Filesystem:
             if self._limiter is not None:
                 self._limiter.consume(len(value))
             f.write(value)
+            _notify_hdd()
             return True
         except OSError as e:
             return None, self._err(e)
@@ -289,6 +319,7 @@ class Filesystem:
             return False
         try:
             os.rename(self._real(from_path), self._real(to_path))
+            _notify_hdd()
             return True
         except OSError as e:
             logger.error("OSError renaming %s to %s: %s", from_path, to_path, e)
@@ -303,6 +334,7 @@ class Filesystem:
                 shutil.rmtree(real)
             else:
                 os.unlink(real)
+            _notify_hdd()
             return True
         except OSError as e:
             logger.error("OSError removing %s: %s", path, e)
@@ -406,6 +438,7 @@ class Filesystem:
             # Throttle ПОСЛЕ чтения: реальный размер не был известен заранее.
             if self._limiter is not None:
                 self._limiter.consume(len(data))
+            _notify_hdd()
             return data.decode("latin-1")
         except OSError as e:
             return None, self._err(e)
