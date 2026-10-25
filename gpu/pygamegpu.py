@@ -77,6 +77,9 @@ _MODIFIER_KEYS = {
     pygame.K_LGUI, pygame.K_RGUI,
 }
 
+# Максимальное число ячеек в кэше композитных surface
+_CELL_CACHE_LIMIT = 8192
+
 
 class PygameGPU(BaseGPU):
     def __init__(self, require_ce=False, **kwargs):
@@ -86,6 +89,7 @@ class PygameGPU(BaseGPU):
         self._display = None
         self._font = None
         self._glyph_cache = {}
+        self._cell_cache = {}           # (cp, fg, bg, wide) -> Surface
         self._unhandled = set()
         self._dirty_cells: set[tuple[int, int]] = set()
         self._key_unicode_cache = {}
@@ -103,7 +107,7 @@ class PygameGPU(BaseGPU):
                 return surf.get_size() if surf else None
             except Exception:
                 return None
-            
+
     def _init_window(self):
         pygame.init()
         try:
@@ -158,6 +162,7 @@ class PygameGPU(BaseGPU):
         self._surface = pygame.Surface((w, h))
         self._surface.fill(self._bg_rgb)
         self._glyph_cache.clear()
+        self._cell_cache.clear()
         self._dirty = True
         self._dirty_cells.clear()
 
@@ -188,6 +193,56 @@ class PygameGPU(BaseGPU):
         self._glyph_cache[key] = src
         return src
 
+    def _get_cell_surface(self, cp, fg_rgb, bg_rgb, wide):
+        """
+        Готовая поверхность одной ячейки: bg-заливка + глиф (если есть).
+        Кэшируется по (cp, fg, bg, wide), что превращает кадр из
+        «fill+blit на каждую клетку» в «один blit на клетку».
+        """
+        key = (cp, fg_rgb, bg_rgb, wide)
+        cached = self._cell_cache.get(key)
+        if cached is not None:
+            return cached
+
+        cw = self._cell_w * (2 if wide else 1)
+        ch = self._cell_h
+
+        try:
+            s = pygame.Surface((cw, ch))
+            s.fill(bg_rgb)
+        except pygame.error:
+            return None
+
+        if cp and cp != 0x20:
+            glyph = self._get_glyph_surface(cp, fg_rgb, wide)
+            if glyph is not None:
+                try:
+                    s.blit(glyph, (0, 0))
+                except pygame.error:
+                    pass
+            else:
+                # fallback: '?'
+                q = self._get_glyph_surface(ord("?"), fg_rgb, False)
+                if q is not None:
+                    try:
+                        s.blit(q, (0, 0))
+                    except pygame.error:
+                        pass
+                elif self._font is not None:
+                    try:
+                        rendered = self._font.render("?", True, fg_rgb)
+                        s.blit(rendered, (0, 0))
+                    except Exception:
+                        pass
+                if cp > 0x2500 and cp not in self._unhandled:
+                    self._unhandled.add(cp)
+                    logger.warning("Unhandled glyph U+%04X — using '?'", cp)
+
+        if len(self._cell_cache) >= _CELL_CACHE_LIMIT:
+            self._cell_cache.clear()
+        self._cell_cache[key] = s
+        return s
+
     def _cell_rect(self, x, y):
         return pygame.Rect(x * self._cell_w, y * self._cell_h,
                            self._cell_w, self._cell_h)
@@ -199,6 +254,7 @@ class PygameGPU(BaseGPU):
             return
         self._dirty_cells.add((x, y))
 
+    # ── Fallback (сохранён для совместимости / отладки) ────────────────
     def _draw_cell_fallback(self, rect, ch_, fg_rgb, bg_rgb):
         code = ord(ch_)
         q = self._get_glyph_surface(ord("?"), fg_rgb, wide=False)
@@ -216,6 +272,10 @@ class PygameGPU(BaseGPU):
             logger.warning("Unhandled glyph U+%04X (%r) — using '?'", code, ch_)
 
     def _render_cell(self, x, y):
+        """
+        Отрисовка одной клетки «в лоб». Используется как эталон / резервный
+        путь. В горячем пути (``_flush``) не вызывается — там батчинг.
+        """
         ch_ = self._tbuffer[y][x]
         fg_rgb = self._fbuffer[y][x]
         bg_rgb = self._bbuffer[y][x]
@@ -270,30 +330,108 @@ class PygameGPU(BaseGPU):
             self._dirty = False
             return
 
-        for (x, y) in self._dirty_cells:
-            self._render_cell(x, y)
+        dirty = self._dirty_cells
+        self._dirty_cells = set()
 
-        min_x = min(x for x, _ in self._dirty_cells)
-        max_x = max(x for x, _ in self._dirty_cells)
-        min_y = min(y for _, y in self._dirty_cells)
-        max_y = max(y for _, y in self._dirty_cells)
+        surf       = self._surface
+        cw         = self._cell_w
+        ch         = self._cell_h
+        cols       = self._cols
+        rows       = self._rows
+        font_data  = self._font_data
+        tb         = self._tbuffer
+        fb         = self._fbuffer
+        bb         = self._bbuffer
+        get_cell   = self._get_cell_surface
+        has_sel    = bool(self._selection_cells)
+        apply_sel  = self._apply_selection_color
+
+        min_x = 1 << 30
+        min_y = 1 << 30
+        max_x = -1
+        max_y = -1
+
+        blits = []
+        append = blits.append
+
+        for (x, y) in dirty:
+            if x < 0 or x >= cols or y < 0 or y >= rows:
+                continue
+            cell = tb[y][x]
+            if cell == "\x00":
+                # continuation of a wide glyph — drawn by its origin cell
+                continue
+
+            fg = fb[y][x]
+            bg = bb[y][x]
+            if has_sel:
+                bg = apply_sel(bg, x, y)
+
+            px = x * cw
+            py = y * ch
+
+            cp = 0
+            wide = False
+            if cell and cell != " ":
+                cp = ord(cell)
+                entry = font_data.get(cp)
+                if entry is not None and entry[1] == 16 and x + 1 < cols:
+                    wide = True
+
+            try:
+                cell_surf = get_cell(cp, fg, bg, wide)
+            except Exception:
+                logger.exception("cell surface failed for (%d,%d)", x, y)
+                cell_surf = None
+
+            if cell_surf is not None:
+                append((cell_surf, (px, py)))
+
+            if x < min_x: min_x = x
+            if x > max_x: max_x = x
+            if y < min_y: min_y = y
+            if y > max_y: max_y = y
+
+        if max_x < 0:
+            self._dirty = False
+            return
+
+        # Одна батч-операция (pygame 2.1+ → fblits, 2.0 → blits, fallback loop)
+        if blits:
+            try:
+                surf.fblits(blits)
+            except AttributeError:
+                try:
+                    surf.blits(blits)
+                except AttributeError:
+                    for s, p in blits:
+                        surf.blit(s, p)
+            except Exception:
+                logger.exception("batched blit failed, per-cell fallback")
+                for s, p in blits:
+                    try:
+                        surf.blit(s, p)
+                    except pygame.error:
+                        self._quit = True
+                        return
 
         rect = pygame.Rect(
-            min_x * self._cell_w, min_y * self._cell_h,
-            (max_x - min_x + 1) * self._cell_w,
-            (max_y - min_y + 1) * self._cell_h,
+            min_x * cw, min_y * ch,
+            (max_x - min_x + 1) * cw,
+            (max_y - min_y + 1) * ch,
         )
-        if rect.right < self._cell_w * self._cols:
-            rect.width += self._cell_w
+        # Сохраняем поведение оригинала: чуть расширяем, если правый край
+        # не упирается в границу экрана.
+        if rect.right < cw * cols:
+            rect.width += cw
 
         try:
-            self._display.blit(self._surface, (0, 0))
+            self._display.blit(surf, rect.topleft, rect)
             pygame.display.update(rect)
         except pygame.error:
             self._quit = True
             return
 
-        self._dirty_cells.clear()
         self._dirty = False
 
     # ── Обработка событий ──────────────────────────────────────────────
@@ -331,7 +469,6 @@ class PygameGPU(BaseGPU):
         if self._quit or self._surface is None:
             return
         try:
-            # peek() → SDL_PeepEvents, не SDL_PumpEvents, дешевле get().
             if pygame.event.peek():
                 for ev in pygame.event.get():
                     self._handle_event(ev)
@@ -353,7 +490,6 @@ class PygameGPU(BaseGPU):
             ev = pygame.event.wait(timeout=timeout)
             if ev.type != pygame.NOEVENT:
                 self._handle_event(ev)
-            # Слить всё, что успело накопиться за время бодрствования.
             for ev in pygame.event.get():
                 self._handle_event(ev)
         except pygame.error:
@@ -369,13 +505,11 @@ class PygameGPU(BaseGPU):
         shift = bool(mods & pygame.KMOD_SHIFT)
 
         if down:
-            # ── Copy: Ctrl+C, Ctrl+Insert ──────────────────────────
             if ctrl and not shift and (key == pygame.K_c or key == pygame.K_INSERT):
                 if self._has_selection():
                     if self._copy_selection_to_clipboard():
                         return
 
-            # ── Paste: Ctrl+V, Insert, Shift+Insert ────────────────
             if (ctrl and key == pygame.K_v) \
                     or (key == pygame.K_INSERT) \
                     or (shift and key == pygame.K_INSERT):
@@ -383,7 +517,6 @@ class PygameGPU(BaseGPU):
                     self._clear_selection()
                 return
 
-            # ── Select All: Ctrl+Shift+A ───────────────────────────
             if ctrl and shift and key == pygame.K_a:
                 self._select_all()
                 return
@@ -391,7 +524,6 @@ class PygameGPU(BaseGPU):
             if key not in _MODIFIER_KEYS and self._has_selection():
                 self._clear_selection()
 
-        # ── Разрешение кодов клавиш (с поддержкой Unicode) ──────────
         if key in _KEY_MAP:
             ascii_code, scan = _KEY_MAP[key]
         elif ctrl and pygame.K_a <= key <= pygame.K_z:
@@ -403,13 +535,12 @@ class PygameGPU(BaseGPU):
                 if len(ch) == 1 and 32 <= ord(ch) < 127:
                     ascii_code, scan = ord(ch), -1
                 else:
-                    # Передаем ЧИСЛОВОЙ код символа (Unicode), а не строку
                     ascii_code = ord(ch)
                     scan = -1
                 self._key_unicode_cache[key] = (ascii_code, scan)
             else:
                 return
-        else: # KEYUP
+        else:  # KEYUP
             cached = self._key_unicode_cache.pop(key, None)
             if cached is not None:
                 ascii_code, scan = cached
@@ -425,7 +556,7 @@ class PygameGPU(BaseGPU):
                     return
 
         self._push_key(ascii_code, scan, down)
-        
+
     def _on_mouse(self, ev, down):
         if self._sel_dragging:
             if not down:

@@ -126,7 +126,7 @@ class SDL2GPU(BaseGPU):
         except Exception:
             return None
         return (w.value, h.value)
-    
+
     def _init_window(self):
         if not _SDL2_AVAILABLE:
             raise RuntimeError(
@@ -147,9 +147,6 @@ class SDL2GPU(BaseGPU):
             err = sdl2.SDL_GetError().decode('utf-8', errors='replace')
             raise RuntimeError(f"SDL_CreateWindow failed: {err}")
 
-        # Без SDL_RENDERER_PRESENTVSYNC — на многих драйверах он делает
-        # SDL_RenderPresent spin-wait'ом до vsync. FPS-лимит мы уже
-        # держим программно через self._fps.
         self._renderer = sdl2.SDL_CreateRenderer(
             self._window, -1,
             sdl2.SDL_RENDERER_ACCELERATED,
@@ -290,16 +287,46 @@ class SDL2GPU(BaseGPU):
             self._dirty = False
             return
 
-        for (x, y) in self._dirty_cells:
-            self._render_cell(x, y)
-        self._dirty_cells.clear()
+        dirty = self._dirty_cells
+        self._dirty_cells = set()
 
-        w, h = self._surface_size()
+        # 1. Обновить пиксели в _pixel_buf для всех dirty-клеток
+        for (x, y) in dirty:
+            self._render_cell(x, y)
+
+        # 2. Вычислить минимальный bbox и залить в текстуру только его
+        min_x = min(x for x, _ in dirty)
+        max_x = max(x for x, _ in dirty)
+        min_y = min(y for _, y in dirty)
+        max_y = max(y for _, y in dirty)
+
+        cw = self._cell_w
+        ch = self._cell_h
+        W = self._cols * cw
+
+        px = min_x * cw
+        py = min_y * ch
+        pw = (max_x - min_x + 1) * cw
+        ph = (max_y - min_y + 1) * ch
+
+        src_rect = sdl2.SDL_Rect(px, py, pw, ph)
 
         try:
-            pixels_ptr = (ctypes.c_ubyte * len(self._pixel_buf)).from_buffer(
+            # Указатель на начало dirty-региона внутри _pixel_buf.
+            # SDL_UpdateTexture читает ph строк по pitch=W*4 байт,
+            # копируя ровно pw*4 байт из каждой — остальное пропускается.
+            buf_arr = (ctypes.c_ubyte * len(self._pixel_buf)).from_buffer(
                 self._pixel_buf)
-            sdl2.SDL_UpdateTexture(self._texture, None, pixels_ptr, w * 4)
+            src_offset = (py * W + px) * 4
+            src_ptr = ctypes.cast(
+                ctypes.addressof(buf_arr) + src_offset,
+                ctypes.POINTER(ctypes.c_ubyte),
+            )
+
+            sdl2.SDL_UpdateTexture(
+                self._texture, ctypes.byref(src_rect), src_ptr, W * 4,
+            )
+
             sdl2.SDL_RenderClear(self._renderer)
             sdl2.SDL_RenderCopy(self._renderer, self._texture, None, None)
             sdl2.SDL_RenderPresent(self._renderer)
@@ -375,7 +402,6 @@ class SDL2GPU(BaseGPU):
         elif got < 0:
             self._quit = True
             return
-        # Слить остаток
         while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
             if not self._handle_event(event):
                 return
@@ -431,8 +457,6 @@ class SDL2GPU(BaseGPU):
             text = event.text.text.decode('utf-8', errors='replace')
             for ch in text:
                 code = ord(ch)
-                # ВАЖНО: передаем -1 как scancode, чтобы OpenOS не путал
-                # скан-коды SDL2 с PC/AT скан-кодами.
                 self._push_key(code, -1, True)
                 self._push_key(code, -1, False)
         except Exception:
@@ -445,7 +469,6 @@ class SDL2GPU(BaseGPU):
         shift = bool(mod & sdl2.KMOD_SHIFT)
 
         if down:
-            # ── Горячие клавиши ────────────────────────────────────
             if ctrl and not shift and (sym == sdl2.SDLK_c or sym == sdl2.SDLK_INSERT):
                 if self._has_selection():
                     if self._copy_selection_to_clipboard(): return
@@ -463,23 +486,19 @@ class SDL2GPU(BaseGPU):
             if sym not in _mods and self._has_selection():
                 self._clear_selection()
 
-        # ── Ctrl-комбинации (Ctrl+A, Ctrl+C и т.д.) ────────────────
         if ctrl and sdl2.SDLK_a <= sym <= sdl2.SDLK_z:
             ascii_code = sym - sdl2.SDLK_a + 1
             scan = CTRL_SCAN.get(ascii_code, -1)
             self._push_key(ascii_code, scan, down)
             return
 
-        # ── Специальные клавиши (стрелки, F1-F12, Enter и т.д.) ────
         if sym in self._key_map:
             ascii_code, scan = self._key_map[sym]
             self._push_key(ascii_code, scan, down)
             return
 
-        # ── Обычные печатные клавиши ───────────────────────────────
-        # Для них всё делает _on_textinput. Здесь мы ничего не отправляем.
         return
-        
+
     def _on_wheel(self, event):
         dy = event.wheel.y
         if dy == 0:

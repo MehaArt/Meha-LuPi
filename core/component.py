@@ -18,6 +18,12 @@ _uuid: Callable | None = None
 # Глобальный hook: превращает Python list/dict → Lua-таблицу.
 _result_converter: Callable | None = None
 
+# Fast-path для конвертации: примитивы не нужно гонять через _lua_convert
+_PRIMITIVES = (bool, int, float, str, bytes, type(None))
+
+# Fast-path для проверки аргументов: эти типы точно НЕ являются Lua-таблицами
+_PYTHON_TYPES = (str, bytes, int, float, bool, list, dict, tuple, type(None))
+
 
 def set_result_converter(fn):
     global _result_converter
@@ -27,12 +33,16 @@ def set_result_converter(fn):
 def _convert(result):
     if _result_converter is None:
         return result
+    # Если результат — примитив, возвращаем как есть (Lupa отлично его понимает)
+    if type(result) in _PRIMITIVES:
+        return result
     return _result_converter(result)
 
 
 def _is_lua_table(x) -> bool:
     """Heuristic: lupa table (не str/bytes/число/list/dict/tuple/None)."""
-    if isinstance(x, (str, bytes, int, float, bool, list, dict, tuple, type(None))):
+    # type() работает быстрее, чем isinstance() с длинным кортежем
+    if type(x) in _PYTHON_TYPES:
         return False
     return hasattr(x, "items") or hasattr(x, "keys")
 
@@ -76,6 +86,7 @@ class _ComponentCallback:
             raise RuntimeError(f"Method {self.name!r} not found on {entry.type}")
 
         # Если Lua вызвал через `:` (colon) — первый аргумент сама proxy-таблица.
+        # Оптимизация: проверяем только если аргументы вообще есть.
         if args and _is_lua_table(args[0]):
             args = args[1:]
 

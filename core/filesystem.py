@@ -13,9 +13,15 @@ filesystem.py — порт src/lua/core/filesystem.lua + src/c/lnative.c (fs-ч�
 readonly — если True, запрещает открытие на запись / remove / rename /
 makeDirectory / setLabel. По умолчанию False. Пробрасывается из
 component.connect() (см. core/component.py).
+
+rate_limit — если > 0, ограничивает суммарную скорость чтения и записи
+байт/сек (token bucket, допускает «всплеск» до 100 мс, чтобы мелкие
+операции вроде getLabel() не тормозили). Устанавливается глобально через
+set_default_rate_limit() (см. init.py --fs-speed). 0 = без лимита.
 """
 from __future__ import annotations
 import os
+import time
 import shutil
 import logging
 from pathlib import Path
@@ -23,6 +29,31 @@ from pathlib import Path
 from core import component as component_module
 
 logger = logging.getLogger("lupi.filesystem")
+
+
+# ── Глобальный лимит скорости (по умолчанию 0 = unlimited) ────────────────────
+_default_rate_limit = 0
+
+
+def set_default_rate_limit(rate: int) -> None:
+    """Установить лимит скорости чтения/записи байт/сек для ВСЕХ новых ФС.
+
+    0 = без лимита. Применяется ко всем последующим register() и
+    component.connect("filesystem", ...). Уже зарегистрированные ФС
+    сохраняют свой лимит (при желании можно пересоздать).
+    """
+    global _default_rate_limit
+    try:
+        n = int(rate) if rate else 0
+    except (TypeError, ValueError):
+        n = 0
+    _default_rate_limit = max(0, n)
+    logger.info("Filesystem default rate limit: %s",
+                f"{_default_rate_limit} B/s" if _default_rate_limit else "unlimited")
+
+
+def get_default_rate_limit() -> int:
+    return _default_rate_limit
 
 
 # ── Lua <-> Python строковые конверсии ────────────────────────────────────────
@@ -45,6 +76,56 @@ def _to_lua(s):
     if not isinstance(s, str):
         return s
     return s.encode('utf-8').decode('latin-1')
+
+
+# ── Token bucket ──────────────────────────────────────────────────────────────
+class _RateLimiter:
+    """Ограничитель суммарной скорости (байт/сек) через token bucket.
+
+    max_tokens = rate * 0.1 — разрешаем «всплеск» до 100 мс, чтобы мелкие
+    операции (list/getLabel и т.п.) не тормозили, но устойчивая скорость
+    не превышает rate.
+    """
+
+    def __init__(self, bytes_per_sec: float):
+        self.rate = float(bytes_per_sec)
+        self.last = time.monotonic()
+        self.tokens = 0.0
+        self.max_tokens = max(self.rate * 0.1, 1.0)
+
+    def consume(self, n_bytes: int) -> None:
+        if self.rate <= 0 or n_bytes <= 0:
+            return
+
+        now = time.monotonic()
+        self.tokens = min(self.max_tokens,
+                          self.tokens + (now - self.last) * self.rate)
+        self.last = now
+
+        if n_bytes > self.tokens:
+            deficit = n_bytes - self.tokens
+            self._sleep(deficit / self.rate)
+            self.tokens = 0.0
+            self.last = time.monotonic()
+        else:
+            self.tokens -= n_bytes
+
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        """Спим, но пумпим pygame/Tk, чтобы окно не «замерзало»."""
+        if seconds <= 0:
+            return
+        deadline = time.monotonic() + seconds
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            try:
+                from core import computer as _c
+                _c._maybe_pump()
+            except Exception:
+                pass
+            time.sleep(min(0.01, remain))
 
 
 class LuaIterable:
@@ -85,7 +166,8 @@ def _canonical(path: str) -> str:
 
 class Filesystem:
     def __init__(self, base_path: str, label: str | None = None,
-                 readonly: bool = False, speed: int = 4):
+                 readonly: bool = False, speed: int = 4,
+                 rate_limit: int | None = None):
         self.base_path = str(Path(base_path).resolve())
         os.makedirs(self.base_path, exist_ok=True)
         self._handles: dict[int, object] = {}
@@ -95,6 +177,16 @@ class Filesystem:
         if label is None:
             label = os.path.basename(self.base_path) or "/"
         self._label = str(label)
+
+        # rate_limit: None → взять глобальный default
+        if rate_limit is None:
+            rate_limit = _default_rate_limit
+        try:
+            self._rate_limit = max(0, int(rate_limit)) if rate_limit else 0
+        except (TypeError, ValueError):
+            self._rate_limit = 0
+        self._limiter = (_RateLimiter(self._rate_limit)
+                         if self._rate_limit > 0 else None)
 
     def _real(self, path: str) -> str:
         if isinstance(path, str):
@@ -106,7 +198,6 @@ class Filesystem:
         msg = str(e)
         if self.base_path and self.base_path in msg:
             msg = msg.replace(self.base_path, "").lstrip("\\/")
-        # Очищаем от нелатинских символов, чтобы Lupa не падала
         return msg.encode('latin-1', errors='replace').decode('latin-1') or "io error"
 
     # ── API методы ──────────────────────────────────────────────────────────
@@ -182,6 +273,9 @@ class Filesystem:
                 value = value.encode("latin-1", errors="replace")
             elif not isinstance(value, (bytes, bytearray)):
                 value = str(value).encode("utf-8")
+            # Throttle ДО записи: размер известен, списываем токены заранее.
+            if self._limiter is not None:
+                self._limiter.consume(len(value))
             f.write(value)
             return True
         except OSError as e:
@@ -309,6 +403,9 @@ class Filesystem:
                 data = f.read(n)
             if not data:
                 return None
+            # Throttle ПОСЛЕ чтения: реальный размер не был известен заранее.
+            if self._limiter is not None:
+                self._limiter.consume(len(data))
             return data.decode("latin-1")
         except OSError as e:
             return None, self._err(e)
@@ -340,9 +437,11 @@ class Filesystem:
 
 def register(base_path: str, uuid: str | None = None,
              label: str | None = None, readonly: bool = False,
-             speed: int = 4) -> str:
-    fs = Filesystem(base_path, label=label, readonly=readonly, speed=speed)
+             speed: int = 4, rate_limit: int | None = None) -> str:
+    fs = Filesystem(base_path, label=label, readonly=readonly,
+                    speed=speed, rate_limit=rate_limit)
     addr = component_module.register(uuid, "filesystem", fs.as_proxy())
-    logger.info("Filesystem registered: %s -> %s (label=%r, readonly=%s)",
-                addr, base_path, fs._label, readonly)
+    logger.info("Filesystem registered: %s -> %s (label=%r, readonly=%s, rate_limit=%s)",
+                addr, base_path, fs._label, readonly,
+                f"{fs._rate_limit} B/s" if fs._rate_limit else "unlimited")
     return addr

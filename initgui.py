@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-initgui.py — лаунчер LuPI (v24 - Sound Options).
+initgui.py — лаунчер LuPI (v25 - FS Speed Limit).
 """
 from __future__ import annotations
 import os, sys, json, shlex, time, tempfile, threading, subprocess, io, atexit
@@ -66,10 +66,14 @@ DEFAULTS = {
     "px_w": 640, "px_h": 400, "scale": 1, "fps": 30,
     "allow_resize": False, "bios": "bios/code.lua", "extra": "",
     "allow_beep": False, "allow_sounds": False,
+    "fs_speed": "8M",
 }
 
 ROOT_OPTIONS = ["openos", "mineos", ""]
 RAM_OPTIONS  = ["8M", "", "512K", "1M", "2M", "4M", "16M", "32M", "64M", "128M", "256M", "512M", "1G", "2G"]
+FS_SPEED_OPTIONS = ["8M", "", "4K", "8K", "16K", "32K", "64K", "128K", "256K",
+                    "512K", "1M", "2M", "4M", "16M", "32M", "64M", "128M",
+                    "256M", "512M", "1G"]
 
 def _detect_gpu() -> str:
     for mod, kind in (("pygame", "pygame"), ("sdl2", "sdl2")):
@@ -173,6 +177,7 @@ class App(tk.Tk):
         cfg["root"]  = self.v["root"].get().strip()
         cfg["ram"]   = self.v["ram"].get().strip()
         cfg["mounts"] = list(self.mounts)
+        cfg["fs_speed"] = self.v["fs_speed"].get().strip()
         cfg["res_mode"] = self.v["res_mode"].get()
         cfg["cols"]  = _int(self.v["cols"].get(), 80)
         cfg["rows"]  = _int(self.v["rows"].get(), 25)
@@ -386,12 +391,12 @@ class App(tk.Tk):
         else:
             w_px = _int(self.v["px_w"].get(), 640); h_px = _int(self.v["px_h"].get(), 400); scale = self.v["scale"].get()
             cw = 8 * scale; ch = 16 * scale; cols = max(1, w_px // cw); rows = max(1, h_px // ch); w_px = cols * cw; h_px = rows * ch
-            
+
         if cols < 5 or rows < 5:
             self.preview_canvas.create_text(200, 120, text="Size too small", fill="red")
             self.lbl_grid_info.config(text="Grid: ?")
             return
-            
+
         self.lbl_grid_info.config(text=f"Grid: {cols} × {rows}  (Resolution: {w_px}x{h_px})")
         max_cw, max_ch = 400, 240; ratio = w_px / h_px
         if ratio > max_cw / max_ch: canvas_w = max_cw; canvas_h = int(max_cw / ratio)
@@ -399,7 +404,7 @@ class App(tk.Tk):
         cell_w = max(1, canvas_w // cols); cell_h = max(1, canvas_h // rows); canvas_w = cols * cell_w; canvas_h = rows * cell_h
         self.preview_canvas.config(width=canvas_w, height=canvas_h)
         self.preview_canvas.create_rectangle(0, 0, canvas_w, canvas_h, fill="#000000", outline=self.colors["border"])
-        
+
         try:
             screen = [[(" ", "#000000") for _ in range(cols)] for _ in range(rows)]
             text_lines = ["OpenOS 1.8.10 (8192k RAM)", "Did you know OpenComputers has a forum? No? Well, it's at https://oc.cil.li/."]
@@ -414,38 +419,38 @@ class App(tk.Tk):
                             space_idx = part.rfind(" ")
                             if space_idx != -1: part = greeting[:space_idx]
                         wrapped.append(part); max_line_len = max(max_line_len, len(part)); greeting = greeting[len(part):].lstrip()
-            
+
             box_w = max_line_len + 4
             if box_w >= cols: box_w = cols - 2
-                
+
             screen[0][1] = ("╒", "#FFFFFF")
             if box_w < cols: screen[0][box_w] = ("╕", "#FFFFFF")
             for c in range(2, min(box_w, cols)): screen[0][c] = ("═", "#FFFFFF")
-            
+
             for i, line in enumerate(wrapped):
                 if 1 + i >= rows - 1: break
                 screen[1 + i][1] = ("│", "#FFFFFF")
                 if box_w < cols: screen[1 + i][box_w] = ("│", "#FFFFFF")
                 for c, char in enumerate(line):
                     if 2 + c < box_w and 2 + c < cols: screen[1 + i][2 + c] = (char, "#FFFFFF")
-                    
+
             bottom_r = 1 + min(len(wrapped), rows - 2)
             if bottom_r < rows:
                 screen[bottom_r][1] = ("└", "#FFFFFF")
                 if box_w < cols: screen[bottom_r][box_w] = ("┘", "#FFFFFF")
                 for c in range(2, min(box_w, cols)): screen[bottom_r][c] = ("─", "#FFFFFF")
-                
+
             prompt_r = bottom_r + 1
             if prompt_r < rows:
                 for c, char in enumerate("/home #"):
                     if 1 + c < cols: screen[prompt_r][1 + c] = (char, "#FF5555")
         except IndexError:
-            pass 
+            pass
 
         if cell_w > 6 and cell_h > 10:
             for i in range(1, cols): self.preview_canvas.create_line(i*cell_w, 0, i*cell_w, canvas_h, fill="#0a0a0a")
             for j in range(1, rows): self.preview_canvas.create_line(0, j*cell_h, canvas_w, j*cell_h, fill="#0a0a0a")
-            
+
         for r in range(rows):
             for c in range(cols):
                 char, color = screen[r][c]
@@ -454,18 +459,50 @@ class App(tk.Tk):
                 self.preview_canvas.create_image(c * cell_w, r * cell_h, image=img, anchor="nw")
 
     def _build_tab_disks(self):
-        tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  Disks  "); tab.columnconfigure(0, weight=1); tab.rowconfigure(2, weight=1)
-        ttk.Label(tab, text="Extra disks mounted as filesystem components:", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        ttk.Label(tab, text="RO = read-only (must exist) • RW = read-write (created if missing)", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        lf = ttk.Frame(tab); lf.grid(row=2, column=0, sticky="nsew"); lf.columnconfigure(0, weight=1); lf.rowconfigure(0, weight=1)
-        self.disk_list = tk.Listbox(lf, height=8, relief="flat", bd=0, highlightthickness=1, activestyle="none")
+        tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  Disks  ")
+        tab.columnconfigure(0, weight=1); tab.rowconfigure(2, weight=1)
+
+        # ── Extra disks list ────────────────────────────────────────────
+        ttk.Label(tab, text="Extra disks mounted as filesystem components:",
+                  font=("TkDefaultFont", 10, "bold")).grid(
+                      row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(tab, text="RO = read-only (must exist) • RW = read-write (created if missing)",
+                  style="Muted.TLabel").grid(
+                      row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        lf = ttk.Frame(tab); lf.grid(row=2, column=0, sticky="nsew")
+        lf.columnconfigure(0, weight=1); lf.rowconfigure(0, weight=1)
+        self.disk_list = tk.Listbox(lf, height=8, relief="flat", bd=0,
+                                    highlightthickness=1, activestyle="none")
         self.disk_list.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(lf, orient="vertical", command=self.disk_list.yview); sb.grid(row=0, column=1, sticky="ns"); self.disk_list.config(yscrollcommand=sb.set)
+        sb = ttk.Scrollbar(lf, orient="vertical", command=self.disk_list.yview)
+        sb.grid(row=0, column=1, sticky="ns"); self.disk_list.config(yscrollcommand=sb.set)
+
         btns = ttk.Frame(tab); btns.grid(row=2, column=1, sticky="n", padx=(10, 0))
         ttk.Button(btns, text="+ RO", command=lambda: self._add_disk(False)).pack(fill="x", pady=(0, 4))
         ttk.Button(btns, text="+ RW", command=lambda: self._add_disk(True)).pack(fill="x", pady=(0, 4))
         ttk.Button(btns, text="Remove", command=self._remove_disk).pack(fill="x", pady=(0, 4))
         ttk.Button(btns, text="Clear all", command=self._clear_disks).pack(fill="x")
+
+        # ── Filesystem speed limit ──────────────────────────────────────
+        ttk.Label(tab, text="Filesystem speed limit:",
+                  font=("TkDefaultFont", 10, "bold")).grid(
+                      row=3, column=0, columnspan=2, sticky="w", pady=(16, 4))
+
+        speed_row = ttk.Frame(tab)
+        speed_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.v["fs_speed"] = tk.StringVar()
+        ttk.Combobox(speed_row, textvariable=self.v["fs_speed"],
+                     values=FS_SPEED_OPTIONS, width=10).pack(side="left")
+        ttk.Label(speed_row,
+                  text="  per disk  (4K, 1M, 8M, 64M;  0 / empty = unlimited)",
+                  style="Muted.TLabel").pack(side="left")
+
+        ttk.Label(tab,
+                  text="Applies to root, tmpfs and every mounted disk. Read + write combined.",
+                  style="Muted.TLabel").grid(
+                      row=5, column=0, columnspan=2, sticky="w", pady=(0, 0))
+
         self._refresh_disks()
 
     def _add_disk(self, rw: bool):
@@ -489,18 +526,18 @@ class App(tk.Tk):
 
     def _build_tab_sound(self):
         tab = ttk.Frame(self.nb, padding=16); self.nb.add(tab, text="  Sound  "); tab.columnconfigure(0, weight=1)
-        
+
         ttk.Label(tab, text="Sound & Beeps", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
         ttk.Label(tab, text="By default, all sounds are disabled to prevent unnecessary noise.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 16))
-        
+
         self.v["allow_beep"] = tk.BooleanVar()
         chk_beep = ttk.Checkbutton(tab, text="Allow computer.beep() (Lua) and error beeps", variable=self.v["allow_beep"])
         chk_beep.grid(row=2, column=0, sticky="w", pady=(0, 12))
-        
+
         self.v["allow_sounds"] = tk.BooleanVar()
         chk_sound = ttk.Checkbutton(tab, text="Allow sound component playback (music, effects)", variable=self.v["allow_sounds"])
         chk_sound.grid(row=3, column=0, sticky="w", pady=(0, 12))
-        
+
         ttk.Label(tab, text="Note: Error BSODs will also beep twice if 'computer.beep()' is allowed.", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(16, 0))
 
     def _build_tab_bios(self):
@@ -597,7 +634,8 @@ class App(tk.Tk):
         self.v["extra"].set(c.get("extra", ""))
         self.v["allow_beep"].set(bool(c.get("allow_beep", False)))
         self.v["allow_sounds"].set(bool(c.get("allow_sounds", False)))
-        
+        self.v["fs_speed"].set(c.get("fs_speed", "8M"))
+
         self._refresh_disks(); self._bios_load_meta(); self._on_res_mode_change(); self._on_scale_change()
 
     def _apply_theme(self):
@@ -648,6 +686,7 @@ class App(tk.Tk):
         if c["root"]: a += ["--root", c["root"]]
         if c["ram"]: a += ["--ram", c["ram"]]
         for m in c["mounts"]: a += ["--mount-disk-rw" if m["rw"] else "--mount-disk", m["path"]]
+        if c["fs_speed"]: a += ["--fs-speed", c["fs_speed"]]
         if c["bios"]: a += ["--bios", c["bios"]]
         gpu = c["gpu"]
         if gpu == "pygame": a.append("--pygame")
@@ -687,7 +726,7 @@ class App(tk.Tk):
         self._force_save(); self._start_time = time.time()
         gpu = self.v["gpu"].get()
         self._log("\n" + "─" * 70 + "\n", "info")
-        
+
         try:
             if gpu == "text":
                 self._launch_terminal(base)
@@ -764,7 +803,7 @@ class App(tk.Tk):
             kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
 
         self.proc = subprocess.Popen(args, **kwargs)
-    
+
     def _copy_logs(self):
         try:
             text = self.log_text.get("1.0", "end-1c")
@@ -783,11 +822,11 @@ class App(tk.Tk):
         rc = self.proc.poll()
         if rc is None:
             self._monitor_id = self.after(400, self._monitor); return
-        
+
         if self._log_file_path and os.path.exists(self._log_file_path):
             try:
                 with open(self._log_file_path, "r", encoding="utf-8", errors="replace") as f:
-                    pass 
+                    pass
             except Exception: pass
 
         uptime = time.time() - self._start_time

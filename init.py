@@ -96,6 +96,46 @@ def _parse_ram(s):
     return int(n * mult)
 
 
+def _parse_fs_speed(s):
+    """'4k' → 4096; '64K' → 65536; '1m' → 1048576; '0'/None → 0 (unlimited)."""
+    if s is None:
+        return 0
+    t = str(s).strip().lower()
+    if not t or t == "0" or t in ("none", "unlimited", "off"):
+        return 0
+
+    mult = 1
+    if t.endswith("kb"):
+        mult = 1024
+        t = t[:-2]
+    elif t.endswith("mb"):
+        mult = 1024 * 1024
+        t = t[:-2]
+    elif t.endswith("gb"):
+        mult = 1024 * 1024 * 1024
+        t = t[:-2]
+    elif t.endswith("k"):
+        mult = 1024
+        t = t[:-1]
+    elif t.endswith("m"):
+        mult = 1024 * 1024
+        t = t[:-1]
+    elif t.endswith("g"):
+        mult = 1024 * 1024 * 1024
+        t = t[:-1]
+    elif t.endswith("b"):
+        t = t[:-1]
+
+    try:
+        n = float(t)
+    except ValueError:
+        raise ValueError(
+            f"bad fs-speed {s!r} (expected e.g. 4k, 64k, 1m, 0=unlimited)")
+    if n < 0:
+        raise ValueError(f"bad fs-speed {s!r}: must be >= 0")
+    return int(n * mult)
+
+
 def _expand_mounts(specs):
     result = []
     for raw in specs or []:
@@ -139,6 +179,14 @@ def parse_args():
         metavar="PATH[,PATH...]",
         help="То же, что --mount-disk, но read-write. Каталоги создаются, "
              "если отсутствуют.",
+    )
+
+    p.add_argument(
+        "--fs-speed", default=None, metavar="BYTES",
+        help="Ограничение суммарной скорости чтения/записи КАЖДОЙ "
+             "файловой системы (байт/сек, можно с суффиксом k/m/g). "
+             "Например: --fs-speed 4k (не более 4 КиБ/с на диск). "
+             "0 / пусто = без лимита (по умолчанию).",
     )
 
     p.add_argument("--bios",       default="bios/code.lua",
@@ -340,6 +388,23 @@ def main():
         if ram_bytes is not None:
             computer_mod.set_memory_model(ram_bytes)
             lprint(f"RAM: {ram_bytes} bytes ({ram_bytes / 1024.0:.2f} KiB)")
+
+    # ── Filesystem speed limit (--fs-speed) ─────────────────────────────
+    try:
+        fs_rate = _parse_fs_speed(args.fs_speed)
+    except ValueError as e:
+        print(f"[init] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Устанавливаем глобальный default ДО регистрации любой ФС,
+    # чтобы и root/tmpfs/mount-disk, и последующие component.connect
+    # получали этот же лимит.
+    filesystem_mod.set_default_rate_limit(fs_rate)
+    if fs_rate > 0:
+        lprint(f"Filesystem speed limit: {fs_rate} B/s "
+               f"(~{fs_rate / 1024.0:.1f} KiB/s)")
+    else:
+        lprint("Filesystem speed limit: unlimited")
 
     lprint("LuPI Python Port — L1 INIT")
     machine_address = random_mod.uuid()
@@ -835,7 +900,7 @@ def _invoke_tuple(addr, method, *args) -> tuple:
         n = len(r)
         return tuple(r[i] for i in range(1, n + 1))
     except Exception:
-        return ()
+        return (r,)
 
 
 def _draw_bsod_via_gpu(title: str, lines: list[str]) -> bool:
