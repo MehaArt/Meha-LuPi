@@ -66,7 +66,7 @@ DEFAULTS = {
     "px_w": 640, "px_h": 400, "scale": 1, "fps": 30,
     "allow_resize": False, "bios": "bios/code.lua", "extra": "",
     "allow_beep": False, "allow_sounds": False, "allow_pc_sounds": False,
-    "fs_speed": "8M",
+    "fs_speed": "8M", "drive": False, "drive_tier": "0", "drive_label": "data"
 }
 
 ROOT_OPTIONS = ["openos", "mineos", ""]
@@ -123,9 +123,17 @@ def _load_font_hex() -> dict:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+
+        # ── DPI / screen-aware UI scaling ────────────────────────────────
+        self.ui_scale = self._compute_ui_scale()
+        try:
+            # 1 point = ui_scale * 4/3 pixels  (96 DPI → tk scaling = 1.333)
+            self.tk.call('tk', 'scaling', self.ui_scale * 4.0 / 3.0)
+        except Exception:
+            pass
+
         self.title("LuPI Launcher")
-        self.geometry("860x760")
-        self.minsize(680, 520)
+        self._apply_window_geometry()
 
         self.cfg = self._load_cfg()
         self.theme = self.cfg.get("theme", "dark")
@@ -154,6 +162,39 @@ class App(tk.Tk):
         self.bind("<Control-s>",      lambda e: self._force_save())
 
         self._set_running(False)
+
+    # ── UI scaling helpers ───────────────────────────────────────────
+    def _compute_ui_scale(self) -> float:
+        """Определяем масштаб UI по DPI и размеру экрана."""
+        try:
+            dpi = float(self.winfo_fpixels('1i'))
+            scale = dpi / 96.0
+        except Exception:
+            scale = 1.0
+        # Небольшой boost для крупных экранов с низким DPI (4K @ 100%)
+        try:
+            sw = self.winfo_screenwidth()
+            if sw >= 2560 and scale < 1.25:
+                scale = min(1.5, scale * 1.25)
+        except Exception:
+            pass
+        return max(0.75, min(2.5, scale))
+
+    def _apply_window_geometry(self):
+        """Размер и позиция окна с учётом экрана + адаптивный minsize."""
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        except Exception:
+            sw, sh = 1280, 720
+        s = self.ui_scale
+        win_w = max(480, min(int(860 * s), int(sw * 0.92)))
+        win_h = max(400, min(int(760 * s), int(sh * 0.88)))
+        min_w = max(360, min(int(680 * s), int(sw * 0.85), win_w))
+        min_h = max(280, min(int(520 * s), int(sh * 0.85), win_h))
+        x = max(0, (sw - win_w) // 2)
+        y = max(0, (sh - win_h) // 2)
+        self.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        self.minsize(min_w, min_h)
 
     # ── Config ────────────────────────────────────────────────────────
     def _load_cfg(self) -> dict:
@@ -191,6 +232,11 @@ class App(tk.Tk):
         cfg["allow_beep"]   = bool(self.v["allow_beep"].get())
         cfg["allow_sounds"] = bool(self.v["allow_sounds"].get())
         cfg["allow_pc_sounds"] = bool(self.v["allow_pc_sounds"].get())
+        cfg["drive"] = bool(self.v["drive"].get())
+        # Парсим "0 (Floppy...)" -> "0"
+        tier_str = self.v["drive_tier"].get()
+        cfg["drive_tier"] = tier_str.split()[0] if tier_str else "0"
+        cfg["drive_label"] = self.v["drive_label"].get().strip()[:16]        
         return cfg
 
     def _save(self):
@@ -221,23 +267,24 @@ class App(tk.Tk):
     #  UI
     # ══════════════════════════════════════════════════════════════════
     def _build_ui(self):
-        bar = ttk.Frame(self, padding=(8, 6))
+        s = self.ui_scale
+        bar = ttk.Frame(self, padding=(int(8 * s), int(6 * s)))
         bar.pack(side="top", fill="x")
 
         self.btn_launch = ttk.Button(bar, text="▶  Launch", style="Primary.TButton", command=self._launch)
         self.btn_launch.pack(side="left")
         self.btn_stop = ttk.Button(bar, text="■  Stop", style="Danger.TButton", command=self._stop)
-        self.btn_stop.pack(side="left", padx=(6, 0))
+        self.btn_stop.pack(side="left", padx=(int(6 * s), 0))
 
-        ttk.Button(bar, text="📋 Copy Logs", command=self._copy_logs).pack(side="right", padx=(4, 0))
-        ttk.Button(bar, text="Show command", command=self._show_command).pack(side="right", padx=(4, 0))
-        ttk.Button(bar, text="🌓 Theme", command=self._toggle_theme).pack(side="right", padx=(4, 0))
+        ttk.Button(bar, text="📋 Copy Logs", command=self._copy_logs).pack(side="right", padx=(int(4 * s), 0))
+        ttk.Button(bar, text="Show command", command=self._show_command).pack(side="right", padx=(int(4 * s), 0))
+        ttk.Button(bar, text="🌓 Theme", command=self._toggle_theme).pack(side="right", padx=(int(4 * s), 0))
 
-        self.paned = tk.PanedWindow(self, orient="vertical", sashwidth=5, bd=0, relief="flat", bg=self.colors["bg"])
-        self.paned.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 4))
+        self.paned = tk.PanedWindow(self, orient="vertical", sashwidth=int(5 * s), bd=0, relief="flat", bg=self.colors["bg"])
+        self.paned.pack(side="top", fill="both", expand=True, padx=int(8 * s), pady=(0, int(4 * s)))
 
         self.nb = ttk.Notebook(self.paned)
-        self.paned.add(self.nb, minsize=340, stretch="always")
+        self.paned.add(self.nb, minsize=int(340 * s), stretch="always")
 
         self._build_tab_main()
         self._build_tab_display()
@@ -246,7 +293,7 @@ class App(tk.Tk):
         self._build_tab_bios()
 
         log_frame = ttk.Frame(self.paned)
-        self.paned.add(log_frame, minsize=100, stretch="always")
+        self.paned.add(log_frame, minsize=int(100 * s), stretch="always")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -256,7 +303,7 @@ class App(tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         self.log_text.config(yscrollcommand=sb.set)
 
-        self.status = tk.Label(self, anchor="w", padx=10, pady=4, text="Ready")
+        self.status = tk.Label(self, anchor="w", padx=int(10 * s), pady=int(4 * s), text="Ready")
         self.status.pack(side="bottom", fill="x")
 
     def _build_tab_main(self):
@@ -330,7 +377,10 @@ class App(tk.Tk):
         self.lbl_scale = ttk.Label(self.row_scale, text="x1", width=4); self.lbl_scale.pack(side="left")
         r += 1
         prev_frame = ttk.Frame(tab); prev_frame.grid(row=r, column=0, columnspan=4, sticky="nsew", pady=(10, 10)); prev_frame.columnconfigure(0, weight=1)
-        self.preview_canvas = tk.Canvas(prev_frame, width=400, height=240, bg="#000000", highlightthickness=1); self.preview_canvas.grid(row=0, column=0)
+        # ── масштабируемое превью ──
+        pv_w = int(400 * self.ui_scale)
+        pv_h = int(240 * self.ui_scale)
+        self.preview_canvas = tk.Canvas(prev_frame, width=pv_w, height=pv_h, bg="#000000", highlightthickness=1); self.preview_canvas.grid(row=0, column=0)
         self.lbl_grid_info = ttk.Label(prev_frame, text="Grid: ?", style="Muted.TLabel"); self.lbl_grid_info.grid(row=1, column=0, pady=(4, 0))
         r += 1
         fr = ttk.Frame(tab); fr.grid(row=r, column=0, columnspan=4, sticky="w", pady=(10, 6))
@@ -393,13 +443,17 @@ class App(tk.Tk):
             w_px = _int(self.v["px_w"].get(), 640); h_px = _int(self.v["px_h"].get(), 400); scale = self.v["scale"].get()
             cw = 8 * scale; ch = 16 * scale; cols = max(1, w_px // cw); rows = max(1, h_px // ch); w_px = cols * cw; h_px = rows * ch
 
+        # ── масштабируемые лимиты превью ──
+        max_cw = int(400 * self.ui_scale)
+        max_ch = int(240 * self.ui_scale)
+
         if cols < 5 or rows < 5:
-            self.preview_canvas.create_text(200, 120, text="Size too small", fill="red")
+            self.preview_canvas.create_text(max_cw // 2, max_ch // 2, text="Size too small", fill="red")
             self.lbl_grid_info.config(text="Grid: ?")
             return
 
         self.lbl_grid_info.config(text=f"Grid: {cols} × {rows}  (Resolution: {w_px}x{h_px})")
-        max_cw, max_ch = 400, 240; ratio = w_px / h_px
+        ratio = w_px / h_px
         if ratio > max_cw / max_ch: canvas_w = max_cw; canvas_h = int(max_cw / ratio)
         else: canvas_h = max_ch; canvas_w = int(max_ch * ratio)
         cell_w = max(1, canvas_w // cols); cell_h = max(1, canvas_h // rows); canvas_w = cols * cell_w; canvas_h = rows * cell_h
@@ -504,12 +558,41 @@ class App(tk.Tk):
                   style="Muted.TLabel").grid(
                       row=5, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
+        # ── Drive component ─────────────────────────────────────────────
+        ttk.Label(tab, text="Drive Component (Low-level Floppy/HDD):",
+                  font=("TkDefaultFont", 10, "bold")).grid(
+                      row=6, column=0, columnspan=2, sticky="w", pady=(20, 4))
+        
+        self.v["drive"] = tk.BooleanVar()
+        chk_drive = ttk.Checkbutton(tab, text="Enable drive component (--drive)", 
+                                    variable=self.v["drive"], command=self._toggle_drive_ui)
+        chk_drive.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        self.drive_frame = ttk.Frame(tab)
+        self.drive_frame.grid(row=8, column=0, columnspan=2, sticky="w", padx=(20, 0), pady=(0, 10))
+        
+        ttk.Label(self.drive_frame, text="Tier:").pack(side="left")
+        self.v["drive_tier"] = tk.StringVar()
+        ttk.Combobox(self.drive_frame, textvariable=self.v["drive_tier"], 
+                     values=["0 (Floppy 512K)", "1 (HDD 1M)", "2 (HDD 2M)", "3 (HDD 4M)"], 
+                     width=15, state="readonly").pack(side="left", padx=(4, 16))
+        
+        ttk.Label(self.drive_frame, text="Label:").pack(side="left")
+        self.v["drive_label"] = tk.StringVar()
+        ttk.Entry(self.drive_frame, textvariable=self.v["drive_label"], width=15).pack(side="left", padx=(4, 0))
+        
         self._refresh_disks()
 
     def _add_disk(self, rw: bool):
         p = filedialog.askdirectory(parent=self, title="Choose disk directory")
         if p: self.mounts.append({"path": p, "rw": rw}); self._refresh_disks(); self._schedule_save()
 
+    def _toggle_drive_ui(self):
+        if self.v["drive"].get():
+            self.drive_frame.grid()
+        else:
+            self.drive_frame.grid_remove()
+            
     def _remove_disk(self):
         for i in sorted(list(self.disk_list.curselection()), reverse=True):
             if 0 <= i < len(self.mounts): del self.mounts[i]
@@ -642,7 +725,15 @@ class App(tk.Tk):
         self.v["allow_sounds"].set(bool(c.get("allow_sounds", False)))
         self.v["allow_pc_sounds"].set(bool(c.get("allow_pc_sounds", False)))
         self.v["fs_speed"].set(c.get("fs_speed", "8M"))
-
+        
+        self.v["drive"].set(bool(c.get("drive", False)))
+        tier_val = str(c.get("drive_tier", "0"))
+        # Восстанавливаем строку для Combobox
+        tier_match = [v for v in ["0 (Floppy 512K)", "1 (HDD 1M)", "2 (HDD 2M)", "3 (HDD 4M)"] if v.startswith(tier_val)]
+        self.v["drive_tier"].set(tier_match[0] if tier_match else "0 (Floppy 512K)")
+        self.v["drive_label"].set(c.get("drive_label", "data"))
+        self._toggle_drive_ui()
+        
         self._refresh_disks(); self._bios_load_meta(); self._on_res_mode_change(); self._on_scale_change()
 
     def _apply_theme(self):
@@ -709,6 +800,12 @@ class App(tk.Tk):
         if c["allow_beep"]: a.append("--allow-beep")
         if c["allow_sounds"]: a.append("--allow-sounds")
         if c["allow_pc_sounds"]: a.append("--allow-pc-sounds")
+        
+        if c["drive"]:
+            a.append("--drive")
+            a += ["--drive-tier", c["drive_tier"]]
+            if c["drive_label"]:
+                a += ["--drive-label", c["drive_label"]]
         if c["extra"]:
             try: a += shlex.split(c["extra"])
             except ValueError as e: raise RuntimeError(f"invalid extra args: {e}")
