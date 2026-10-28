@@ -238,8 +238,9 @@ def doc(address: str, method: str) -> str | None:
     return _components[address].doc.get(method)
 
 
-def get_type(address: str) -> str:
-    return _components[address].type
+def get_type(address: str):
+    entry = _components.get(address)
+    return entry.type if entry else None
 
 
 def slot():
@@ -334,7 +335,7 @@ def connect(kind, address=None, slot=None, *args):
 
         if kind == "internet":
             from core import internet as internet_mod
-            result = internet_mod.start()
+            result = internet_mod.start(address)
             if isinstance(result, str):
                 return True
             return result
@@ -342,6 +343,20 @@ def connect(kind, address=None, slot=None, *args):
         if kind == "sound":
             from core import sound as sound_mod
             result = sound_mod.register(address)
+            if isinstance(result, str):
+                return True
+            return result
+
+        if kind == "drive":
+            from core import drive as drive_mod
+            try:
+                tier = int(args[0]) if args and args[0] is not None else 0
+            except (TypeError, ValueError):
+                tier = 0
+            label = args[1] if len(args) > 1 and isinstance(args[1], str) else ""
+            save_dir = args[2] if len(args) > 2 and isinstance(args[2], str) else None
+            result = drive_mod.register(address, save_dir=save_dir,
+                                        tier=tier, label=label)
             if isinstance(result, str):
                 return True
             return result

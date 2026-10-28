@@ -3,7 +3,8 @@ sound.py — sound-компонент для LuPI (OpenComputers-совмест�
 
 Реализует полный API звуковой карты OpenComputers:
   - 8 каналов со своим состоянием (wave / frequency / volume / ADSR / FM / AM)
-  - setWave / setFrequency / setVolume / setADSR / setFM / setAM
+  - setWave / getWave / setFrequency / getFrequency / getADSR
+  - setVolume / getVolume / setADSR / setFM / getFM / setAM / getAM
   - resetFM / resetAM / resetEnvelope / open / close
   - setTotalVolume / getTotalVolume
   - delay(ms) + process()/play() — накопили буфер, потом проиграли
@@ -226,6 +227,10 @@ class SoundComponent:
             return True
         return False
 
+    def get_wave(self, *args):
+        ch, _ = self._ch(*args)
+        return ch.wave
+
     def set_frequency(self, *args):
         ch, rest = self._ch(*args)
         v = None
@@ -237,6 +242,10 @@ class SoundComponent:
             ch.frequency = v
             return True
         return False
+
+    def get_frequency(self, *args):
+        ch, _ = self._ch(*args)
+        return ch.frequency
 
     def set_volume(self, *args):
         ch, rest = self._ch(*args)
@@ -299,7 +308,16 @@ class SoundComponent:
         elif len(nums) == 1:
             ch.attack = max(0.0, nums[0]) * 1000.0
         return True
-    
+
+    def get_adsr(self, *args):
+        ch, _ = self._ch(*args)
+        return (
+            ch.attack / 1000.0,
+            ch.decay / 1000.0,
+            ch.sustain,
+            ch.release / 1000.0,
+        )
+
     def reset_envelope(self, *args):
         ch, _ = self._ch(*args)
         ch.attack = 0.0
@@ -318,6 +336,10 @@ class SoundComponent:
             ch.fm_mod = nums[1]
         return True
 
+    def get_fm(self, *args):
+        ch, _ = self._ch(*args)
+        return ch.fm_freq, ch.fm_mod
+
     def reset_fm(self, *args):
         ch, _ = self._ch(*args)
         ch.fm_freq = 0.0
@@ -333,6 +355,10 @@ class SoundComponent:
         if len(nums) > 1:
             ch.am_mod = nums[1]
         return True
+
+    def get_am(self, *args):
+        ch, _ = self._ch(*args)
+        return ch.am_freq, ch.am_mod
 
     def reset_am(self, *args):
         ch, _ = self._ch(*args)
@@ -456,7 +482,9 @@ class SoundComponent:
             "open":               self.open,
             "close":              self.close,
             "setWave":            self.set_wave,
+            "getWave":            self.get_wave,
             "setFrequency":       self.set_frequency,
+            "getFrequency":       self.get_frequency,
             "setVolume":          self.set_volume,
             "getVolume":          self.get_volume,
             "setPitch":           self.set_pitch,
@@ -466,10 +494,13 @@ class SoundComponent:
             "setTotalVolume":     self.set_total_volume,
             "getTotalVolume":     self.get_total_volume,
             "setADSR":            self.set_adsr,
+            "getADSR":            self.get_adsr,
             "resetEnvelope":      self.reset_envelope,
             "setFM":              self.set_fm,
+            "getFM":              self.get_fm,
             "resetFM":            self.reset_fm,
             "setAM":              self.set_am,
+            "getAM":              self.get_am,
             "resetAM":            self.reset_am,
             "delay":              self.delay,
             "process":            self.process,

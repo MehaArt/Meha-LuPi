@@ -414,10 +414,13 @@ class Filesystem:
         """
         latin-1, чтобы байты не портились (.pic, бинарные иконки и т.д.).
 
-        count == inf / огромное число → читаем всё.
-        count < 0                     → клампим в 0 (OCEmu: math.max(count,0))
-                                        → read(0) → "" → None (EOF).
-        count == 0                    → read(0) → "" → None.
+        Семантика OC:
+          count == inf / огромное число → читаем всё, nil в конце файла.
+          count < 0                     → клампим в 0.
+          count == 0                    → "" если НЕ в конце файла,
+                                          nil если в конце.
+          count > 0                     → читаем до n байт,
+                                          nil в конце файла.
         """
         f = self._handles.get(handle)
         if f is None:
@@ -425,6 +428,8 @@ class Filesystem:
         try:
             if count == float('inf') or count > 10**9:
                 data = f.read()
+                if not data:
+                    return None
             else:
                 try:
                     n = int(count) if count is not None else 0
@@ -432,9 +437,20 @@ class Filesystem:
                     return None, "bad argument #2 (number expected)"
                 if n < 0:
                     n = 0
+                if n == 0:
+                    # OC semantics: read(0) → nil at EOF, "" otherwise.
+                    # Python f.read(0) всегда возвращает b"", поэтому
+                    # проверяем EOF через peek.
+                    pos = f.tell()
+                    peek = f.read(1)
+                    if not peek:
+                        return None
+                    f.seek(pos)
+                    _notify_hdd()
+                    return ""
                 data = f.read(n)
-            if not data:
-                return None
+                if not data:
+                    return None
             # Throttle ПОСЛЕ чтения: реальный размер не был известен заранее.
             if self._limiter is not None:
                 self._limiter.consume(len(data))

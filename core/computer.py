@@ -234,9 +234,51 @@ def pull_signal(timeout: float | None = None):
 
 # ── Keymap ────────────────────────────────────────────────────────────────────
 _KEYMAP: dict[int, int] = {
+    # цифры
     48: 0x2,  49: 0x3,  50: 0x4,  51: 0x5,  52: 0x6,
     53: 0x7,  54: 0x8,  55: 0x9,  56: 0xA,  57: 0xB,
-    13: 28,   127: 14,  9: 15,
+    # управляющие
+    13: 0x1C,  # Enter
+    127: 0x0E, # Backspace
+    8: 0x0E,   # Backspace (после _ASCII_TR[127]=8)
+    9: 0x0F,   # Tab
+    27: 0x01,  # Escape
+    32: 0x39,  # Space
+    # пунктуация (PC/AT set 1, нижний регистр)
+    45: 0x0C,  # -
+    61: 0x0D,  # =
+    91: 0x1A,  # [
+    93: 0x1B,  # ]
+    92: 0x2B,  # \
+    59: 0x27,  # ;
+    39: 0x28,  # '
+    96: 0x29,  # `
+    44: 0x33,  # ,
+    46: 0x34,  # .
+    47: 0x35,  # /
+    # пунктуация (shifted)
+    43: 0x0D,  # +
+    95: 0x0C,  # _
+    123: 0x1A, # {
+    125: 0x1B, # }
+    124: 0x2B, # |
+    58: 0x27,  # :
+    34: 0x28,  # "
+    126: 0x29, # ~
+    60: 0x33,  # <
+    62: 0x34,  # >
+    63: 0x35,  # ?
+    # shifted цифры
+    33: 0x02,  # !
+    64: 0x03,  # @
+    35: 0x04,  # #
+    36: 0x05,  # $
+    37: 0x06,  # %
+    94: 0x07,  # ^
+    38: 0x08,  # &
+    42: 0x09,  # *
+    40: 0x0A,  # (
+    41: 0x0B,  # )
 }
 _CTRL_MAP = {
     0x01: 0x1E, 0x02: 0x30, 0x04: 0x2E, 0x05: 0x20, 0x06: 0x12,
@@ -507,13 +549,87 @@ def get_device_info() -> dict:
         return {}
     out = {}
     for addr, entry in component_mod._components.items():
-        out[addr] = {
+        info = {
             "Class":       entry.type,
             "Description": "",
             "Product":     entry.type,
             "Vendor":      "",
             "Capacity":    0,
         }
+        try:
+            raw = entry.raw_proxy
+            if entry.type == "filesystem":
+                fn = raw.get("spaceTotal")
+                if fn:
+                    try:
+                        cap = int(fn())
+                        if cap > 0:
+                            info["Capacity"] = cap
+                    except Exception:
+                        pass
+                ro_fn = raw.get("isReadOnly")
+                if ro_fn:
+                    try:
+                        info["ReadOnly"] = bool(ro_fn())
+                    except Exception:
+                        pass
+            elif entry.type == "screen":
+                vp_fn = raw.get("getViewport")
+                if vp_fn:
+                    try:
+                        vp = vp_fn()
+                        if isinstance(vp, tuple) and len(vp) >= 2:
+                            info["Width"] = int(vp[0])
+                            info["Height"] = int(vp[1])
+                    except Exception:
+                        pass
+                depth_fn = raw.get("getDepth")
+                if depth_fn:
+                    try:
+                        info["Depth"] = int(depth_fn())
+                    except Exception:
+                        pass
+                info["Tier"] = 3
+            elif entry.type == "gpu":
+                depth_fn = raw.get("getDepth")
+                if depth_fn:
+                    try:
+                        info["Depth"] = int(depth_fn())
+                    except Exception:
+                        pass
+                info["Clock"] = 0.0
+                info["Tier"] = 3
+            elif entry.type == "drive":
+                cap_fn = raw.get("getCapacity")
+                if cap_fn:
+                    try:
+                        info["Capacity"] = int(cap_fn())
+                    except Exception:
+                        pass
+                ss_fn = raw.get("getSectorSize")
+                if ss_fn:
+                    try:
+                        info["SectorSize"] = int(ss_fn())
+                    except Exception:
+                        pass
+                pc_fn = raw.get("getPlatterCount")
+                if pc_fn:
+                    try:
+                        info["PlatterCount"] = int(pc_fn())
+                    except Exception:
+                        pass
+            elif entry.type == "eeprom":
+                size_fn = raw.get("getSize")
+                if size_fn:
+                    try:
+                        info["Capacity"] = int(size_fn())
+                    except Exception:
+                        pass
+                info["DataSize"] = 256
+        except Exception:
+            logger.exception("get_device_info: %s failed", addr)
+
+        out[addr] = info
     return out
 
 

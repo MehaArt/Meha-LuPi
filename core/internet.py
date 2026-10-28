@@ -67,6 +67,21 @@ def _pump():
         pass
 
 
+def _finish_ok(r):
+    """
+    Нормализует результат finishConnect():
+      True            → (True, None)
+      (None, reason)  → (False, reason)
+      None            → (False, "connection failed")
+      прочее          → (False, "connection failed")
+    """
+    if r is True:
+        return True, None
+    if isinstance(r, tuple):
+        return False, (r[1] if len(r) >= 2 and r[1] is not None else "connection failed")
+    return False, "connection failed"
+
+
 class TCPSocket:
     def __init__(self, host: str, port: int, use_ssl: bool = False):
         self._closed = False
@@ -461,13 +476,11 @@ class InternetComponent:
                     continue
 
         # ── handle.response() → code, message, headers, length (OC-порядок) ─
-        # ВАЖНО: headers должны быть Lua-таблицей (а не Python dict/list),
-        # иначе Lupa обернёт их как userdata и headers["X"][1] упадёт.
         def response(*_):
             if state["header"] is None:
-                r = finish_connect()
-                if r is None:
-                    return None, "connection failed"
+                ok, err = _finish_ok(finish_connect())
+                if not ok:
+                    return None, err or "connection failed"
 
             header = state["header"] or {}
             try:
@@ -486,9 +499,9 @@ class InternetComponent:
             if state["closed"]:
                 return None
             if state["header"] is None:
-                r = finish_connect()
-                if r is None:
-                    return None, "connection failed"
+                ok, err = _finish_ok(finish_connect())
+                if not ok:
+                    return None, err or "connection failed"
 
             a = _clean_args(raw_a)
             n = 65535
@@ -634,10 +647,10 @@ class InternetComponent:
             if handle is None:
                 return None, state   # state тут = reason
 
-            r = handle["finishConnect"]()
-            if r is None:
+            ok, err = _finish_ok(handle["finishConnect"]())
+            if not ok:
                 handle["close"]()
-                return None, "connection failed"
+                return None, err or "connection failed"
 
             status_str = state["header"].get("status", "0")
             try:
@@ -679,8 +692,8 @@ class InternetComponent:
         }
 
 
-def start() -> str:
+def start(uuid: str | None = None) -> str:
     comp = InternetComponent()
-    addr = component_module.register(None, "internet", comp.as_proxy())
+    addr = component_module.register(uuid, "internet", comp.as_proxy())
     logger.info("Internet component registered: %s", addr)
     return addr

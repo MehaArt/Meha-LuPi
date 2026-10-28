@@ -36,6 +36,20 @@ class ModemComponent:
         self._strength = MAX_WIRELESS_RANGE
         self._wake_message = None
 
+    # ── helpers ────────────────────────────────────────────────────────
+    def _check_packet_size(self, data):
+        """OC-совместимая проверка: превышение maxPacketSize → ошибка."""
+        total = 0
+        for d in data:
+            if isinstance(d, str):
+                total += len(d)
+            elif isinstance(d, (bytes, bytearray)):
+                total += len(d)
+            else:
+                total += len(str(d))
+        if total > self.max_packet_size:
+            raise ValueError("packet too big")
+
     # ── API ────────────────────────────────────────────────────────────
     def open(self, port, *_):
         p = int(port)
@@ -90,6 +104,7 @@ class ModemComponent:
         p = int(port)
         if p < 1 or p > 65535:
             raise ValueError("invalid port number")
+        self._check_packet_size(data)
 
         target_comp = _find_target(tgt)
         if target_comp is None:
@@ -108,15 +123,17 @@ class ModemComponent:
         p = int(port)
         if p < 1 or p > 65535:
             raise ValueError("invalid port number")
+        self._check_packet_size(data)
         with _registry_lock:
             targets = list(_registry.keys())
-        ok = False
         for addr in targets:
             if addr == self.address:
                 continue
-            if self.send(addr, p, *data):
-                ok = True
-        return ok
+            try:
+                self.send(addr, p, *data)
+            except Exception:
+                logger.exception("modem.broadcast(%s) failed", addr)
+        return True
 
     def as_proxy(self) -> dict:
         p = {

@@ -31,7 +31,7 @@ from core import clipboard   as clipboard_mod
 from gpu  import textgpu     as textgpu_mod
 
 _DEBUG_MODE = False
-_debug_stream = None
+_debug_streams: list = []
 
 _OOM_GRACE_KB = 8.0
 _MEM_HOOK_INTERVAL = 20000
@@ -42,11 +42,48 @@ _REAL_MEMORY_MULTIPLIER = 1.0 / _MEMORY_SCALE
 
 _GPU_KIND = "text"
 
+# ── Логирование ───────────────────────────────────────────────────────────────
+
+# Логгеры, записи которых считаются «компонентными».
+# Всё остальное (lupi.init, lupi.computer, lupi.speaker, lupi.pcsounds,
+# lupi.color, lupi.random, lupi.buffer) идёт в основной лог.
+_COMPONENT_LOGGERS = frozenset((
+    "lupi.component",   # реестр + component.invoke()
+    "lupi.filesystem",
+    "lupi.eeprom",
+    "lupi.internet",
+    "lupi.modem",
+    "lupi.sound",
+    "lupi.clipboard",   # core/clipboard + util/clipboard (общий name)
+    "lupi.data",
+    "lupi.drive",
+    "lupi.gpio",
+))
+
+
+def _is_component_logger(name: str) -> bool:
+    if name in _COMPONENT_LOGGERS:
+        return True
+    if name.startswith("lupi.gpu."):
+        return True
+    return False
+
+
+class _CoreOnlyFilter(logging.Filter):
+    def filter(self, record):
+        return not _is_component_logger(record.name)
+
+
+class _ComponentsOnlyFilter(logging.Filter):
+    def filter(self, record):
+        return _is_component_logger(record.name)
+
+
 def _close_log_stream():
-    global _debug_stream
-    s = _debug_stream
-    _debug_stream = None
-    if s is not None:
+    global _debug_streams
+    streams = _debug_streams
+    _debug_streams = []
+    for s in streams:
         try:
             s.flush()
             s.close()
@@ -236,6 +273,17 @@ def parse_args():
                         "loop + hdd_accessN.ogg on filesystem activity. "
                         "Requires core/sounds/*.ogg and pygame. Emulator "
                         "refuses to start if any of the 8 files is missing.")
+    p.add_argument("--drive", action="store_true",
+                   help="Register a drive component (floppy/HDD emulation).")
+    p.add_argument("--drive-tier", type=int, default=0, choices=[0, 1, 2, 3],
+                   help="Drive tier: 0=floppy 512K, 1/2/3=HDD 1/2/4 MB "
+                        "(default: 0).")
+    p.add_argument("--drive-label", default="",
+                   help="Initial drive label (max 16 chars).")
+    p.add_argument("--drives-dir", default="drives", metavar="PATH",
+                   help="Directory for drive component storage. Relative "
+                        "paths are resolved against the init.py directory. "
+                        "Default: 'drives' (next to init.py).")
     return p.parse_args()
     
 # ── Вспомогательные ───────────────────────────────────────────────────────────
@@ -316,9 +364,16 @@ def _mount_disk(spec: str, readonly: bool, filesystem_mod) -> None:
 
 
 # ── Логирование ───────────────────────────────────────────────────────────────
+def _setup_logging(args):
+    """
+    Возвращает (core_path, components_path) или None, если логирование выключено.
 
-def _setup_logging(args) -> str | None:
-    global _DEBUG_MODE, _debug_stream
+    Файлы:
+      <debug>            — «ядро»: init, computer, speaker, pcsounds, утилиты
+      <debug>.components — компоненты: component/filesystem/eeprom/internet/
+                           modem/sound/clipboard/data/drive/gpio/gpu.*
+    """
+    global _DEBUG_MODE, _debug_streams
 
     debug_target = args.debug
 
@@ -338,30 +393,71 @@ def _setup_logging(args) -> str | None:
     if not os.path.isabs(debug_target):
         debug_target = os.path.join(_HERE, debug_target)
 
+    # lupi.log → lupi.components.log
+    # /p/file.txt → /p/file.components.txt
+    base, ext = os.path.splitext(debug_target)
+    components_target = (base + ".components" + ext) if ext \
+                        else (debug_target + ".components")
+
     try:
-        _debug_stream = open(debug_target, "w", encoding="utf-8", buffering=1)
+        core_stream = open(debug_target, "w", encoding="utf-8", buffering=1)
     except OSError as e:
-        print(f"[init] Cannot open log file {debug_target!r}: {e}",
+        print(f"[init] Cannot open core log file {debug_target!r}: {e}",
               file=sys.stderr)
         sys.exit(1)
 
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        stream=_debug_stream,
-        force=True,
-    )
+    try:
+        comp_stream = open(components_target, "w", encoding="utf-8",
+                           buffering=1)
+    except OSError as e:
+        try:
+            core_stream.close()
+        except Exception:
+            pass
+        print(f"[init] Cannot open components log file "
+              f"{components_target!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    _debug_streams = [core_stream, comp_stream]
+
+    # Полный ресет root logger (аналог basicConfig(force=True)).
+    logging.disable(logging.NOTSET)
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        try:
+            h.close()
+        except Exception:
+            pass
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG)
+    root.propagate = False
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+
+    core_handler = logging.StreamHandler(core_stream)
+    core_handler.setFormatter(fmt)
+    core_handler.setLevel(logging.DEBUG)
+    core_handler.addFilter(_CoreOnlyFilter())
+    root.addHandler(core_handler)
+
+    comp_handler = logging.StreamHandler(comp_stream)
+    comp_handler.setFormatter(fmt)
+    comp_handler.setLevel(logging.DEBUG)
+    comp_handler.addFilter(_ComponentsOnlyFilter())
+    root.addHandler(comp_handler)
+
     _DEBUG_MODE = True
 
     logger.info("=" * 72)
-    logger.info("LuPI session started: %s", time.strftime("%Y-%m-%d %H:%M:%S"))
-    logger.info("log file:  %s", debug_target)
-    logger.info("argv:      %s", sys.argv)
-    logger.info("cwd:       %s", os.getcwd())
+    logger.info("LuPI session started: %s",
+                time.strftime("%Y-%m-%d %H:%M:%S"))
+    logger.info("core log:       %s", debug_target)
+    logger.info("components log: %s", components_target)
+    logger.info("argv:           %s", sys.argv)
+    logger.info("cwd:            %s", os.getcwd())
     logger.info("=" * 72)
-    return debug_target
-
-
+    return (debug_target, components_target)
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -369,8 +465,8 @@ def main():
 
     args = parse_args()
 
-    log_path = _setup_logging(args)
-    if log_path:
+    log_paths = _setup_logging(args)
+    if log_paths is not None:
         computer_mod.add_shutdown_hook(_close_log_stream)
 
     computer_mod.set_debug_mode(_DEBUG_MODE)
@@ -501,6 +597,25 @@ def main():
 
     lprint(f"Registering tmpfs: {tmp_dir} (label={args.tmp_label!r})")
     tmp_addr = filesystem_mod.register(tmp_dir, label=args.tmp_label)
+    if args.drive:
+        from core import drive as drive_mod
+        drives_dir = args.drives_dir
+        if not os.path.isabs(drives_dir):
+            drives_dir = os.path.join(_HERE, drives_dir)
+        drives_dir = os.path.abspath(drives_dir)
+        try:
+            os.makedirs(drives_dir, exist_ok=True)
+        except OSError as e:
+            lprint(f"Warning: cannot create drives dir {drives_dir}: {e}")
+        drive_mod.set_default_save_dir(drives_dir)
+        try:
+            drive_addr = drive_mod.register(
+                tier=args.drive_tier, label=args.drive_label)
+            lprint(f"Drive registered: {drive_addr} "
+                   f"(tier {args.drive_tier}, label={args.drive_label!r}, "
+                   f"storage={drives_dir})")
+        except Exception as e:
+            lprint(f"Warning: drive registration failed: {e}")
     computer_mod._tmp_address = tmp_addr
 
     for spec in _expand_mounts(args.mount_disk):

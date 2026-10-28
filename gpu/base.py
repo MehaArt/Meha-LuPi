@@ -803,9 +803,10 @@ class BaseGPU:
             fg = self._fbuffer[y][x]
             bg = self._bbuffer[y][x]
             # В OC возвращается 5 значений: символ, fg, bg, fg_pal_idx, bg_pal_idx.
-            # Так как мы храним в буферах только RGB, возвращаем None для индексов палитры.
-            return _to_lua(ch), _int_from_rgb(fg), _int_from_rgb(bg), None, None
-        return " ", 0xFFFFFF, 0, None, None
+            # Так как мы храним в буферах только RGB, возвращаем False для индексов
+            # палитры — это OC-совместимо (Lua truthy check: false == false).
+            return _to_lua(ch), _int_from_rgb(fg), _int_from_rgb(bg), False, False
+        return " ", 0xFFFFFF, 0, False, False
 
     def set(self, x, y, value, vertical=False, *_):
         if self._quit:
@@ -1050,14 +1051,16 @@ class ScreenComponent:
         return True
 
     def turn_on(self, *_):
-        old = self._on
+        if self._on:
+            return False
         self._on = True
-        return old
+        return True
 
     def turn_off(self, *_):
-        old = self._on
+        if not self._on:
+            return False
         self._on = False
-        return old
+        return True
 
     def is_on(self, *_):
         return self._on

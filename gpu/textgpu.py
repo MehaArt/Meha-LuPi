@@ -702,6 +702,31 @@ class TextGPU:
         return None
         
     def _push_key(self, kb_addr, ascii_code, scan):
+        # Ctrl+A..Z приходят из curses «готовым» control-кодом (1..26),
+        # без отдельного события нажатия LCtrl. В pygame/sdl2 модификаторы
+        # шлются своими событиями, поэтому edit.lua (и др.) видят
+        # keyboard.isControlDown()==true. В curses этого нет — синтетически
+        # «нажимаем» LCtrl на время key_down/key_up.
+        #
+        # Ограничение: только 1..26 и не спецкоды (8,9,10,13,27), у которых
+        # _CURSES_TO_OC даёт свои пары (Backspace/Tab/LF/CR/Esc).
+        is_ctrl_letter = 1 <= ascii_code <= 26 and ascii_code not in (8, 9, 10, 13, 27)
+
+        if is_ctrl_letter:
+            key_id = scan if scan != -1 else ascii_code
+            try:
+                self._pressed_keys.add(0x1D)  # LCtrl
+                computer.push_signal("key_down", kb_addr, -1, 0x1D, 0)
+                self._pressed_keys.add(key_id)
+                computer.push_signal("key_down", kb_addr, ascii_code, scan, 0)
+                computer.push_signal("key_up", kb_addr, ascii_code, scan, 0)
+                self._pressed_keys.discard(key_id)
+                computer.push_signal("key_up", kb_addr, -1, 0x1D, 0)
+                self._pressed_keys.discard(0x1D)
+            except Exception as e:
+                logger.error("keyboard push error: %s", e)
+            return
+
         key_id = scan if scan != -1 else ascii_code
         try:
             self._pressed_keys.add(key_id)
